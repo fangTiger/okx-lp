@@ -55,7 +55,6 @@ class MachineSnapshot:
     band: PriceBand | None = None
     out_since: datetime | None = None
     out_direction: str | None = None
-    basis_ewma: Decimal | None = None
     failure: str | None = None
     failed_at: datetime | None = None
 
@@ -68,14 +67,8 @@ class MachineSnapshot:
                 raise ValueError("OUT_PENDING 缺少有效的出界时间或方向")
             if self.out_since.tzinfo is None or self.out_since.utcoffset() is None:
                 raise ValueError("出界时间必须包含时区")
-            if self.basis_ewma is not None and (
-                not isinstance(self.basis_ewma, Decimal) or not self.basis_ewma.is_finite()
-            ):
-                raise ValueError("基差均值必须是有限 Decimal")
         elif pending:
             raise ValueError(f"状态 {self.state.value} 不得保存出界挂起字段")
-        elif self.basis_ewma is not None:
-            raise ValueError(f"状态 {self.state.value} 不得保存出界基差均值")
         failed = self.failure is not None or self.failed_at is not None
         if failed:
             if type(self.failure) is not str or not self.failure.strip() or self.failed_at is None:
@@ -99,11 +92,11 @@ class MachineStateStore:
             state = MachineState(raw["state"])
             band = None if raw.get("band") is None else _band(raw["band"])
             out_since = None if raw.get("out_since") is None else _datetime(raw["out_since"])
-            basis = None if raw.get("basis_ewma") is None else Decimal(raw["basis_ewma"])
             failed_at = None if raw.get("failed_at") is None else _datetime(raw["failed_at"])
             return MachineSnapshot(
-                state, band, out_since, raw.get("out_direction"), basis,
-                raw.get("failure"), failed_at,
+                state=state, band=band, out_since=out_since,
+                out_direction=raw.get("out_direction"),
+                failure=raw.get("failure"), failed_at=failed_at,
             )
         except (
             OSError, KeyError, TypeError, ValueError, InvalidOperation,
@@ -121,7 +114,6 @@ class MachineStateStore:
                 None if snapshot.out_since is None else timestamp_text(snapshot.out_since)
             ),
             "out_direction": snapshot.out_direction,
-            "basis_ewma": None if snapshot.basis_ewma is None else str(snapshot.basis_ewma),
             "failure": snapshot.failure,
             "failed_at": None if snapshot.failed_at is None else timestamp_text(snapshot.failed_at),
         }
@@ -160,7 +152,7 @@ def band_dict(band: PriceBand) -> dict[str, Any]:
 def timestamp_text(value: datetime) -> str:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("状态转移时间必须包含时区")
-    return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _datetime(value: Any) -> datetime:

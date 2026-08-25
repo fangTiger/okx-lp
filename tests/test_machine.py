@@ -51,11 +51,11 @@ class FakeRisk:
 class FakeMarket:
     def __init__(self, calls):
         self.calls = calls
-        self.set("100", "100")
+        self.set("100")
 
-    def set(self, price, reference):
+    def set(self, price):
         value = Decimal(price)
-        self.sample = MarketSample(value, price_to_tick(value, 18, 18), Decimal(reference))
+        self.sample = MarketSample(value, price_to_tick(value, 18, 18))
 
     def snapshot(self, _now):
         self.calls.append("market")
@@ -113,11 +113,10 @@ class MachineLifecycleTest(unittest.TestCase):
     def test_replay_completes_full_lifecycle_with_correct_reasons(self):
         self.step()
         self.step(5)
-        for _index in range(3):
-            self.step(60)
-        self.market.set("102", "102")
+        self.market.set("102")
         self.step(5)
-        self.step(5)
+        self.step(179)
+        self.step(1)
         self.step(5)
         self.sessions.allowed = False
         self.sessions.reason = "上市地交易中"
@@ -129,7 +128,7 @@ class MachineLifecycleTest(unittest.TestCase):
             [item["new_state"] for item in records],
             ["ENTERING", "IN_RANGE", "OUT_PENDING", "REBALANCING", "IN_RANGE", "EXITING", "IDLE"],
         )
-        expected = ("做市条件满足", "建仓完成", "池价越过区间上沿", "确认真实移动",
+        expected = ("做市条件满足", "建仓完成", "池价越过区间上沿", "确认需要重组",
                     "再平衡完成", "离开做市时段", "撤出完成")
         for record, reason in zip(records, expected):
             self.assertIn(reason, record["reason"])

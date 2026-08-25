@@ -26,7 +26,6 @@ class Stub:
         self.session = (True, "允许做市")
         self.risk = RiskDecision(True, "风控放行")
         self.price = Decimal("100")
-        self.reference = Decimal("100")
         self.broadcasts = []
         self.rebalances = 0
         self.fail_enter = False
@@ -38,7 +37,7 @@ class Stub:
         return self.risk
 
     def snapshot(self, _now):
-        return MarketSample(self.price, price_to_tick(self.price, 18, 18), self.reference)
+        return MarketSample(self.price, price_to_tick(self.price, 18, 18))
 
     def enter(self, _sample, _band, *, allow_broadcast=False):
         self.broadcasts.append(allow_broadcast)
@@ -56,13 +55,28 @@ class Stub:
         self.rebalances += 1
 
 
+class FailOnceJournal:
+    def __init__(self):
+        self.failed = False
+
+    def append(self, _record):
+        if not self.failed:
+            self.failed = True
+            raise OSError("注入转移日志失败")
+
+
 class MachineSafetyTest(unittest.TestCase):
-    def machine(self, stub, root, *, detector=None, sleep=lambda _seconds: None, alerts=None):
+    def machine(
+        self, stub, root, *, detector=None, sleep=lambda _seconds: None,
+        alerts=None, transition_journal=None,
+    ):
         return MainStateMachine(
             pool_id="pool-1", sessions=stub, risk_gate=stub, market=stub,
             actions=stub, rebalancer=stub, detector=detector or OutrangeDetector(),
             state_store=MachineStateStore(root / "state.json"),
-            transition_journal=TransitionJournal(root / "machine.log"),
+            transition_journal=(
+                transition_journal or TransitionJournal(root / "machine.log")
+            ),
             clock=lambda: stub.now, sleep=sleep,
             alert=(alerts if alerts is not None else []).append,
             tick_spacing=10, token0_decimals=18, token1_decimals=18,
@@ -80,31 +94,25 @@ class MachineSafetyTest(unittest.TestCase):
         self.assertIn("保持 IDLE", result.reason)
         self.assertEqual(stub.broadcasts, [])
 
-    def test_pin_waits_until_timeout_before_rebalancing(self):
+    def test_outside_waits_until_confirmation_before_rebalancing(self):
         with tempfile.TemporaryDirectory() as directory:
             stub = Stub()
             root = Path(directory)
             machine = self.machine(stub, root)
             machine.step()
             machine.step()
-            for _index in range(3):
-                stub.now += timedelta(seconds=60)
-                machine.step()
-            stub.price, stub.reference = Decimal("102"), Decimal("100")
+            stub.price = Decimal("102")
             stub.now += timedelta(seconds=5)
             machine.step()
-            stub.now += timedelta(seconds=5)
+            stub.now += timedelta(seconds=179)
             pending = machine.step()
-            stub.now += timedelta(seconds=594)
-            before_timeout = machine.step()
             stub.now += timedelta(seconds=1)
-            timed_out = machine.step()
+            confirmed = machine.step()
 
             self.assertEqual(pending.state, MachineState.OUT_PENDING)
-            self.assertEqual(before_timeout.state, MachineState.OUT_PENDING)
-            self.assertEqual(timed_out.state, MachineState.REBALANCING)
+            self.assertEqual(confirmed.state, MachineState.REBALANCING)
             self.assertEqual(stub.rebalances, 0)
-            self.assertIn("挂起超时", timed_out.reason)
+            self.assertIn("持续位于界外", confirmed.reason)
 
     def test_action_failure_stays_in_current_state_and_alerts(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -126,6 +134,31 @@ class MachineSafetyTest(unittest.TestCase):
             self.assertIn("阶段已锁停", held.reason)
             self.assertIn("阶段已锁停", held_after_restart.reason)
             self.assertEqual(stub.broadcasts, [False])
+
+    def test_failed_transition_restores_outside_detector_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stub, root = Stub(), Path(directory)
+            tick = price_to_tick(Decimal("100"), 18, 18)
+            low, high = aligned_tick_range(tick, Decimal("0.005"), 10)
+            band = PriceBand(
+                low, high, tick_to_price(low, 18, 18), tick_to_price(high, 18, 18),
+            )
+            MachineStateStore(root / "state.json").save(
+                MachineSnapshot(MachineState.IN_RANGE, band)
+            )
+            machine = self.machine(
+                stub, root, transition_journal=FailOnceJournal(),
+            )
+            stub.price = Decimal("102")
+
+            with self.assertLogs("okxlp.strategy.machine", level="ERROR"):
+                failed = machine.step()
+            stub.price = Decimal("100")
+            recovered = machine.step()
+
+        self.assertEqual(failed.state, MachineState.IN_RANGE)
+        self.assertEqual(recovered.state, MachineState.IN_RANGE)
+        self.assertEqual(recovered.reason, "池价仍在区间内")
 
     def test_run_uses_fast_and_slow_intervals_and_broadcast_defaults_off(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -4,7 +4,7 @@
 
 **Goal:** 实现可注入、可持久化、默认不广播的六状态主状态机，并修复 50/50 粉尘兑换缺口。
 
-**Architecture:** 状态数据与原子存储拆到 `machine_state.py`，`machine.py` 保留检查顺序和转移逻辑。建仓与撤出由可注入动作协议承接，再平衡直接调用 M6 编排器；M4 负责确认真实移动、插针回归和超时。
+**Architecture:** 状态数据与原子存储拆到 `machine_state.py`，`machine.py` 保留检查顺序和转移逻辑。建仓与撤出由可注入动作协议承接，再平衡直接调用 M6 编排器；M4 负责纯链上持续出界计时、回归重置和超时保护。
 
 **Tech Stack:** Python 3.11、`dataclasses`、`Enum`、`Decimal`、JSONL、PyYAML、`unittest`。
 
@@ -49,7 +49,7 @@
 - Create: `src/okxlp/strategy/machine_types.py`
 
 1. 用假时钟、假时段/风控、假池价和假动作回放完整生命周期，断言所有转移及原因。
-2. 补非做市不入场、插针只在超时后重组、检查顺序、广播默认关闭、失败停留并告警测试。
+2. 补非做市不入场、持续出界确认、检查顺序、广播默认关闭、失败停留并告警测试。
 3. 运行 `PYTHONPATH=src .venv/bin/python -m unittest tests.test_machine -v`，确认 RED。
 4. 实现固定 ±0.5% 区间、状态优先级、M4/M6 组合、5/60 秒循环与安全失败处理。
 5. 重跑状态机定向测试，确认 GREEN。

@@ -3,9 +3,8 @@
 mode: dry_run
 
 outrange:
-  basis_jump_threshold: 0.004  # 基差相对 EWMA 突变阈值：0.4%
-  confirm_seconds: 180        # 参考价不可用时持续界外确认时间
-  pin_timeout: 600            # 插针挂起最长 10 分钟
+  confirm_seconds: 180        # 持续界外确认时间
+  pin_timeout: 600            # 持续界外确认上限保护
 
 limits:
   total_capital_usd: 0

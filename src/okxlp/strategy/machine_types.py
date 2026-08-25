@@ -14,11 +14,10 @@ WIDTH = Decimal("0.005")
 
 @dataclass(frozen=True)
 class MarketSample:
-    """主状态机一次决策所用的池价、tick 与参考价。"""
+    """主状态机一次决策所用的链上池价与 tick。"""
 
     price: Decimal
     tick: int
-    reference_price: Decimal | None
 
 
 @dataclass(frozen=True)
@@ -66,7 +65,7 @@ class RiskGate(Protocol):
 
 
 class MarketFeed(Protocol):
-    """策略检查阶段使用的池价与参考价契约。"""
+    """策略检查阶段使用的链上池价契约。"""
 
     def snapshot(self, now: datetime) -> MarketSample:
         """返回同一轮决策使用的市场样本。"""

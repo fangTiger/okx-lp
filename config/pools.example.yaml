@@ -28,13 +28,7 @@ pools:
     token1: { symbol: USDC,  address: "0x...", decimals: 6 }   # [待核实 F7]
     fee_bps: 30
     tick_spacing: 60
-    underlying: TSLA            # 对应美股标的，用于行情/日历/对冲
-    reference:
-      provider: yahoo_fx_adr
-      local_symbol: TSLA
-      fx_pair: EURUSD=X
-      cache_ttl_seconds: 60
-      max_staleness_seconds: 1800
+    underlying: TSLA            # 对应美股标的，用于交易时段与事件日历
     listings:
       - venue: NASDAQ
         timezone: America/New_York

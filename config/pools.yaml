@@ -27,14 +27,6 @@ pools:
     tick_spacing: 10
 
     underlying: ASML
-    reference:
-      provider: yahoo_fx_adr
-      local_symbol: ASML.AS
-      fx_pair: EURUSD=X
-      cache_ttl_seconds: 60
-      max_staleness_seconds: 1800
-    # ASML 双重上市：Euronext Amsterdam 为主上市，NASDAQ ADR 为 1:1 对应
-    # 池价跟踪的是 USD 计价的 ADR，因此含 EUR/USD 汇率腿
     listings:
       - venue: Euronext Amsterdam
         timezone: Europe/Amsterdam

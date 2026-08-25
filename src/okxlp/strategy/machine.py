@@ -17,12 +17,13 @@ from okxlp.strategy.machine_stages import MachineStages
 from okxlp.strategy.machine_types import (
     MarketSample, RiskDecision, StepResult, build_price_band,
 )
-from okxlp.strategy.outrange import OutrangeResult
+from okxlp.strategy.outrange import (
+    OutrangeDirection, OutrangeResult,
+)
 
 
 LOGGER = logging.getLogger("okxlp.strategy.machine")
 CONFIRMED = frozenset({
-    OutrangeResult.TRUE_MOVE,
     OutrangeResult.TIME_CONFIRMED,
     OutrangeResult.TIMEOUT_CONFIRMED,
 })
@@ -50,8 +51,7 @@ class MainStateMachine(MachineLoop, MachineStages):
         self.alert = alert if alert is not None else (
             lambda message: LOGGER.error("状态机告警：%s", message))
         self.snapshot = state_store.load()
-        if self.snapshot.basis_ewma is not None:
-            self.detector.restore_basis_ewma(self.snapshot.basis_ewma)
+        self._restore_detector(self.snapshot)
 
     @property
     def state(self) -> MachineState:
@@ -100,60 +100,40 @@ class MainStateMachine(MachineLoop, MachineStages):
 
     def _in_range(self, sample: MarketSample, now: datetime) -> str:
         band = self._required_band()
-        if band.price_lower <= sample.price <= band.price_upper:
-            self.detector.evaluate(
-                sample.price, band.price_lower, band.price_upper,
-                sample.reference_price, now,
-            )
+        event = self.detector.evaluate(
+            sample.price, band.price_lower, band.price_upper, now,
+        )
+        if event is None:
             return "池价仍在区间内"
         side = "下沿" if sample.price < band.price_lower else "上沿"
-        reason = f"池价越过区间{side}"
-        direction = "BELOW" if side == "下沿" else "ABOVE"
+        reason = f"池价越过区间{side}；{event.reason}"
         return self._transition(
             MachineState.OUT_PENDING, reason, sample, band, now,
-            out_since=now, out_direction=direction,
-            basis_ewma=self.detector.basis_ewma,
+            out_since=event.triggered_at, out_direction=event.direction.value,
         )
 
     def _out_pending(self, sample: MarketSample, now: datetime) -> str:
         band = self._required_band()
-        direction = (
-            "BELOW" if sample.price < band.price_lower else
-            "ABOVE" if sample.price > band.price_upper else None
-        )
-        if direction is not None and direction != self.snapshot.out_direction:
-            updated = MachineSnapshot(
-                MachineState.OUT_PENDING, band, now, direction,
-                self.snapshot.basis_ewma,
-            )
-            self.state_store.save(updated)
-            self.snapshot = updated
-            self.detector.reset()
-        if direction is not None and self.snapshot.out_since is not None:
-            pending = int((now - self.snapshot.out_since).total_seconds())
-            if pending >= self.detector.pin_timeout:
-                reason = f"出界挂起超时 {self.detector.pin_timeout} 秒，强制确认"
-                return self._transition(
-                    MachineState.REBALANCING, f"确认需要重组：{reason}",
-                    sample, band, now,
-                )
         event = self.detector.evaluate(
-            sample.price, band.price_lower, band.price_upper,
-            sample.reference_price, now,
+            sample.price, band.price_lower, band.price_upper, now,
         )
-        if event is None and band.price_lower <= sample.price <= band.price_upper:
-            return self._transition(
-                MachineState.IN_RANGE, "价格已回归区间", sample, band, now
-            )
         if event is None:
             return "等待出界判定"
         if event.result is OutrangeResult.REVERTED:
             return self._transition(MachineState.IN_RANGE, event.reason, sample, band, now)
         if event.result in CONFIRMED:
-            prefix = "确认真实移动" if event.result is OutrangeResult.TRUE_MOVE else "确认需要重组"
             return self._transition(
-                MachineState.REBALANCING, f"{prefix}：{event.reason}", sample, band, now
+                MachineState.REBALANCING, f"确认需要重组：{event.reason}", sample, band, now
             )
+        if (
+            event.direction.value != self.snapshot.out_direction
+            or event.triggered_at != self.snapshot.out_since
+        ):
+            updated = MachineSnapshot(
+                MachineState.OUT_PENDING, band, event.triggered_at, event.direction.value,
+            )
+            self.state_store.save(updated)
+            self.snapshot = updated
         return event.reason
 
     def _target_band(self, tick: int) -> PriceBand:
@@ -168,20 +148,33 @@ class MainStateMachine(MachineLoop, MachineStages):
         self, state: MachineState, reason: str, sample: MarketSample,
         band: PriceBand | None, now: datetime, *,
         out_since: datetime | None = None, out_direction: str | None = None,
-        basis_ewma: Any = None,
     ) -> str:
         previous = self.snapshot
-        current = MachineSnapshot(state, band, out_since, out_direction, basis_ewma)
+        current = MachineSnapshot(state, band, out_since, out_direction)
         record_band = band if band is not None else previous.band
-        self.state_store.save(current)
+        state_saved = False
         try:
+            self.state_store.save(current)
+            state_saved = True
             self.transition_journal.append(TransitionRecord(
                 now, self.pool_id, previous.state, state, reason,
                 sample.price, sample.tick, record_band,
             ))
         except Exception:
-            self.state_store.save(previous)
+            try:
+                if state_saved:
+                    self.state_store.save(previous)
+            finally:
+                self._restore_detector(previous)
             raise
         self.snapshot = current
         LOGGER.info("状态转移：%s → %s，原因：%s", previous.state.value, state.value, reason)
         return reason
+
+    def _restore_detector(self, snapshot: MachineSnapshot) -> None:
+        """让检测器内存态与已持久化的主状态保持一致。"""
+        self.detector.reset()
+        if snapshot.state is MachineState.OUT_PENDING:
+            self.detector.restore_pending(
+                snapshot.out_since, OutrangeDirection(snapshot.out_direction),
+            )

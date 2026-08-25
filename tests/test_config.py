@@ -32,12 +32,6 @@ pools:
     fee_bps: 5
     tick_spacing: 10
     underlying: TEST
-    reference:
-      provider: yahoo_fx_adr
-      local_symbol: TEST.AS
-      fx_pair: EURUSD=X
-      cache_ttl_seconds: 60
-      max_staleness_seconds: 1800
     listings:
       - venue: Euronext Amsterdam
         timezone: Europe/Amsterdam
@@ -64,21 +58,16 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.chain.chain_id, 196)
         self.assertEqual(config.pools[0].fee_bps, Decimal("5"))
         self.assertEqual(config.pools[0].listings[0].timezone, "Europe/Amsterdam")
-        self.assertEqual(config.pools[0].reference.provider, "yahoo_fx_adr")
-        self.assertEqual(config.pools[0].reference.local_symbol, "ASML.AS")
-        self.assertEqual(config.pools[0].reference.fx_pair, "EURUSD=X")
-        self.assertEqual(config.pools[0].reference.cache_ttl_seconds, 60)
-        self.assertEqual(config.pools[0].reference.max_staleness_seconds, 1800)
         with self.assertRaises(AttributeError):
             config.chain.chain_id = 1
 
-    def test_actual_risk_config_contains_m4_thresholds(self):
+    def test_actual_risk_config_contains_time_confirmation_thresholds(self):
         data = yaml.safe_load(Path("config/risk.yaml").read_text(encoding="utf-8"))
 
         outrange = data["outrange"]
-        self.assertEqual(Decimal(str(outrange["basis_jump_threshold"])), Decimal("0.004"))
         self.assertEqual(outrange["confirm_seconds"], 180)
         self.assertEqual(outrange["pin_timeout"], 600)
+        self.assertEqual(set(outrange), {"confirm_seconds", "pin_timeout"})
         self.assertEqual(Decimal(str(data["swap"]["min_amount_usd"])), Decimal("1"))
 
     def test_missing_field_reports_full_chinese_path(self):

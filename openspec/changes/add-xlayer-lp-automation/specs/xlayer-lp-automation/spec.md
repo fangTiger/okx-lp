@@ -37,12 +37,24 @@
 - **WHEN** 财报或宏观事件日历拉取失败
 - **THEN** 系统按存在事件处理，采用宽区间，并发出告警
 
-### Requirement: 出界优先再平衡
-系统 SHALL 在头寸出界时立即触发再平衡，且不受收益成本比校验的阻挡。
+### Requirement: 纯链上时间确认出界
+系统 SHALL 只使用链上池价判断出界，不请求外部行情；确认后的再平衡不受收益成本比校验阻挡。
 
-#### Scenario: 价格跌出区间下沿
-- **WHEN** 池当前 tick 低于头寸 tick_lower
-- **THEN** 系统在快循环内产生再平衡意图并优先执行，同时告警
+#### Scenario: 出界尚未达到确认时间
+- **WHEN** 池价位于区间外但持续时间小于 `confirm_seconds`
+- **THEN** 系统保持 `OUT_PENDING`，不产生再平衡意图
+
+#### Scenario: 出界达到确认时间
+- **WHEN** 池价持续位于区间外达到 `confirm_seconds`
+- **THEN** 系统确认出界并进入 `REBALANCING`
+
+#### Scenario: 确认前回到区间
+- **WHEN** `OUT_PENDING` 中的池价在确认前回到区间内
+- **THEN** 系统清除出界计时并回到 `IN_RANGE`
+
+#### Scenario: 出界达到保护上限
+- **WHEN** 池价从首次出界起达到 `pin_timeout` 后仍位于区间外
+- **THEN** 系统作为上限保护确认出界并进入 `REBALANCING`
 
 #### Scenario: 接近边界
 - **WHEN** 当前价距区间边界小于带宽的 20%

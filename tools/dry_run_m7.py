@@ -6,7 +6,6 @@ import logging
 import sys
 import tempfile
 from datetime import datetime, timezone
-from decimal import Decimal
 from pathlib import Path
 
 import yaml
@@ -16,7 +15,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from okxlp.campaign.gate import load_fact_gate
 from okxlp.chain.rpc import JsonRpcClient
 from okxlp.config import load_config
-from okxlp.market.reference import YahooFxAdrReference
 from okxlp.market.sessions import MarketSessions
 from okxlp.strategy.machine import MainStateMachine, MarketSample, RiskDecision
 from okxlp.strategy.machine_journal import TransitionJournal
@@ -104,12 +102,7 @@ def main() -> None:
     pool_config = config.find_pool()
     rpc = JsonRpcClient(config.chain.rpc_urls, chain_id=config.chain.chain_id)
     snapshot = UniswapV3Pool(rpc, pool_config.address).snapshot()
-    reference = YahooFxAdrReference(
-        pool_config.reference.local_symbol, pool_config.reference.fx_pair,
-        cache_ttl_seconds=pool_config.reference.cache_ttl_seconds,
-        max_staleness_seconds=pool_config.reference.max_staleness_seconds,
-    ).get_price(now)
-    sample = MarketSample(snapshot.price, snapshot.tick, reference)
+    sample = MarketSample(snapshot.price, snapshot.tick)
     risk_config = _risk_config()
     outrange = risk_config["outrange"]
     halt_file = Path(risk_config["circuit_breakers"]["halt_file"])
@@ -122,7 +115,6 @@ def main() -> None:
             market=FixedMarket(sample), actions=NoBroadcastActions(),
             rebalancer=NoBroadcastRebalancer(),
             detector=OutrangeDetector(
-                basis_jump_threshold=Decimal(str(outrange["basis_jump_threshold"])),
                 confirm_seconds=int(outrange["confirm_seconds"]),
                 pin_timeout=int(outrange["pin_timeout"]),
             ),
@@ -136,7 +128,6 @@ def main() -> None:
     print("模式：dry-run；allow_broadcast=False；广播交易数=0")
     print(f"链上区块：{snapshot.block}")
     print(f"池价：{snapshot.price} USDC；tick={snapshot.tick}")
-    print(f"参考价：{reference if reference is not None else '不可用'}")
     print(f"时段结论：{'做市' if result.should_make_market else '撤出'}")
     print(f"风控结论：{'放行' if result.risk_allowed else '否决'}")
     print(f"状态决策：IDLE → {result.state.value}")

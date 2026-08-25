@@ -17,6 +17,18 @@ from okxlp.uniswap.tickmath import aligned_tick_range, price_to_tick, tick_to_pr
 from tests.test_machine_safety import START, Stub
 
 
+class FailOnceStateStore(MachineStateStore):
+    def __init__(self, path):
+        super().__init__(path)
+        self.failed = False
+
+    def save(self, snapshot):
+        if not self.failed:
+            self.failed = True
+            raise OSError("注入状态落盘失败")
+        super().save(snapshot)
+
+
 class MachineRecoveryTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -29,12 +41,12 @@ class MachineRecoveryTest(unittest.TestCase):
             low, high, tick_to_price(low, 18, 18), tick_to_price(high, 18, 18)
         )
 
-    def machine(self):
+    def machine(self, detector=None, state_store=None):
         return MainStateMachine(
             pool_id="pool-1", sessions=self.stub, risk_gate=self.stub,
             market=self.stub, actions=self.stub, rebalancer=self.stub,
-            detector=OutrangeDetector(),
-            state_store=MachineStateStore(self.root / "state.json"),
+            detector=detector or OutrangeDetector(),
+            state_store=state_store or MachineStateStore(self.root / "state.json"),
             transition_journal=TransitionJournal(self.root / "machine.log"),
             clock=lambda: self.stub.now, sleep=lambda _seconds: None,
             alert=lambda _message: None, tick_spacing=10,
@@ -57,8 +69,8 @@ class MachineRecoveryTest(unittest.TestCase):
     def test_out_pending_timeout_survives_process_restart(self):
         self.save(MachineSnapshot(MachineState.OUT_PENDING, self.band, START, "ABOVE"))
         self.stub.now = START + timedelta(seconds=600)
-        self.stub.price, self.stub.reference = Decimal("102"), Decimal("100")
-        machine = self.machine()
+        self.stub.price = Decimal("102")
+        machine = self.machine(OutrangeDetector(confirm_seconds=900, pin_timeout=600))
 
         result = machine.step()
 
@@ -66,19 +78,31 @@ class MachineRecoveryTest(unittest.TestCase):
         self.assertIn("挂起超时", result.reason)
         self.assertEqual(self.stub.rebalances, 0)
 
-    def test_out_pending_basis_survives_restart_for_immediate_true_move(self):
-        self.save(MachineSnapshot(
-            MachineState.OUT_PENDING, self.band, START, "ABOVE",
-            basis_ewma=Decimal("0"),
-        ))
-        self.stub.now = START + timedelta(seconds=10)
-        self.stub.price = self.stub.reference = Decimal("102")
+    def test_out_pending_confirmation_timer_survives_process_restart(self):
+        self.save(MachineSnapshot(MachineState.OUT_PENDING, self.band, START, "ABOVE"))
+        self.stub.now = START + timedelta(seconds=180)
+        self.stub.price = Decimal("102")
         machine = self.machine()
 
         result = machine.step()
 
         self.assertEqual(result.state, MachineState.REBALANCING)
-        self.assertIn("确认真实移动", result.reason)
+        self.assertIn("持续位于界外", result.reason)
+
+    def test_failed_state_save_restores_outside_detector_state(self):
+        self.save(MachineSnapshot(MachineState.IN_RANGE, self.band))
+        store = FailOnceStateStore(self.root / "state.json")
+        machine = self.machine(state_store=store)
+        self.stub.price = Decimal("102")
+
+        with self.assertLogs("okxlp.strategy.machine", level="ERROR"):
+            failed = machine.step()
+        self.stub.price = Decimal("100")
+        recovered = machine.step()
+
+        self.assertEqual(failed.state, MachineState.IN_RANGE)
+        self.assertEqual(recovered.state, MachineState.IN_RANGE)
+        self.assertEqual(recovered.reason, "池价仍在区间内")
 
     def test_halt_freezes_exiting_without_forwarding_broadcast(self):
         self.save(MachineSnapshot(MachineState.EXITING, self.band))

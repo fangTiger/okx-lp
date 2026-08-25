@@ -50,7 +50,6 @@ class MachineStages:
             state=self.state, band=self.band,
             out_since=self.snapshot.out_since,
             out_direction=self.snapshot.out_direction,
-            basis_ewma=self.snapshot.basis_ewma,
             failure=detail, failed_at=now,
         )
         self.snapshot = locked

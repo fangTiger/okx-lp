@@ -34,7 +34,7 @@ class MachineStateTest(unittest.TestCase):
         self.assertEqual(restored, MachineSnapshot(MachineState.IN_RANGE, band))
 
     def test_out_pending_time_and_direction_are_restored(self):
-        at = datetime(2026, 8, 26, 1, 2, 3, tzinfo=UTC)
+        at = datetime(2026, 8, 26, 1, 2, 3, 123456, tzinfo=UTC)
         band = PriceBand(-50, 50, Decimal("0.995"), Decimal("1.006"))
         pending = MachineSnapshot(MachineState.OUT_PENDING, band, at, "ABOVE")
         with tempfile.TemporaryDirectory() as directory:

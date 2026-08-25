@@ -48,16 +48,6 @@ class ListingConfig:
     close_time: time
 
 @dataclass(frozen=True)
-class ReferenceConfig:
-    """单池美元公允价的数据源配置。"""
-
-    provider: str
-    local_symbol: str
-    fx_pair: str
-    cache_ttl_seconds: int
-    max_staleness_seconds: int
-
-@dataclass(frozen=True)
 class PoolConfig:
     """需要校验和调度的单池配置。"""
 
@@ -71,7 +61,6 @@ class PoolConfig:
     fee_bps: Decimal
     tick_spacing: int
     underlying: str
-    reference: ReferenceConfig
     listings: tuple[ListingConfig, ...]
 
 
@@ -131,20 +120,6 @@ def _listing(data: Any, path: str) -> ListingConfig:
     )
 
 
-def _reference(data: Any, path: str) -> ReferenceConfig:
-    item = _mapping(data, path)
-    result = ReferenceConfig(
-        _string(_required(item, "provider", path), f"{path}.provider"),
-        _string(_required(item, "local_symbol", path), f"{path}.local_symbol"),
-        _string(_required(item, "fx_pair", path), f"{path}.fx_pair"),
-        _integer(_required(item, "cache_ttl_seconds", path), f"{path}.cache_ttl_seconds"),
-        _integer(_required(item, "max_staleness_seconds", path), f"{path}.max_staleness_seconds"),
-    )
-    if result.cache_ttl_seconds <= 0 or result.max_staleness_seconds <= 0:
-        raise ConfigError(f"{path} 缓存与数据新鲜度阈值必须大于零")
-    return result
-
-
 def _pool(data: Any, index: int) -> PoolConfig:
     path, item = f"pools[{index}]", _mapping(data, f"pools[{index}]")
     listings = tuple(
@@ -167,7 +142,7 @@ def _pool(data: Any, index: int) -> PoolConfig:
         _decimal(_required(item, "fee_bps", path), f"{path}.fee_bps"),
         _integer(_required(item, "tick_spacing", path), f"{path}.tick_spacing"),
         _string(_required(item, "underlying", path), f"{path}.underlying"),
-        _reference(_required(item, "reference", path), f"{path}.reference"), listings,
+        listings,
     )
 
 
