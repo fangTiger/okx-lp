@@ -1,0 +1,41 @@
+# M5 写链执行配置。地址来自 2026-08-25 区块 68886709 的链上校验结果。
+
+chain_id: 196
+
+addresses:
+  pool: "0xc3d659028117f1ae5db9b9c68239b4a71f03ef37"
+  factory: "0x4b2ab38dbf28d31d467aa8993f6c2585981d6804"
+  npm: "0x315e413a11ab0df498ef83873012430ca36638ae"
+  swap_router02: "0x4f0c28f5926afda16bf2506d5d9e57ea190f9bca"
+  quoter_v2: "0xd1b797d92d87b688193a2b976efc8d577d204343"
+  permit2: "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+  weth9: "0xe538905cf8410324e03a5a23c1c177a474d59b2b"
+  wasmlx: "0x9147b03c16b18fc4f686f610f189f91ddf4347b4"
+  usdc: "0xb6ceceab302e2e4948951ee7843fc24e92933061"
+
+# 0.02 gwei 为实测常态；上限偏离常态 50 倍时失败关闭，不盲目追价。
+gas:
+  gas_limit_multiplier: 1.20
+  min_gas_limit: 21000
+  max_gas_limit: 1500000
+  base_fee_multiplier: 2.0
+  min_max_fee_gwei: 0.01
+  max_max_fee_gwei: 1.0
+  min_priority_fee_gwei: 0.001
+  max_priority_fee_gwei: 0.1
+
+# 选择器必须绑定具体目标；QuoterV2 是只读 eth_call，不进入签名白名单。
+whitelist:
+  targets:
+    npm:
+      address: "0x315e413a11ab0df498ef83873012430ca36638ae"
+      selectors:
+        mint: "0x88316456"
+        increaseLiquidity: "0x219f5d17"
+        decreaseLiquidity: "0x0c49ccbe"
+        collect: "0xfc6f7865"
+        burn: "0x42966c68"
+    swap_router02:
+      address: "0x4f0c28f5926afda16bf2506d5d9e57ea190f9bca"
+      selectors:
+        exactInputSingle: "0x04e45aaf"

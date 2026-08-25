@@ -1,0 +1,44 @@
+# 活动事实闸门。未核实项必须声明 blocks: live 或 blocks: size。
+facts:
+  - id: F1
+    name: 合格池清单
+    verified: true
+    note: 已从官方渠道取得合格池清单
+  - id: F2
+    name: 预算池间分配规则
+    verified: false
+    blocks: size
+    note: 尚未校准，仅允许探针仓位
+  - id: F3
+    name: 手续费口径 accrued/collected
+    verified: false
+    blocks: size
+    note: 尚未校准，仅允许探针仓位
+  - id: F4
+    name: 是否需报名绑定地址
+    verified: n/a
+    note: 由人工处理
+  - id: F5
+    name: 奖励领取机制
+    verified: n/a
+    note: 由人工处理
+  - id: F6
+    name: Uniswap 部署
+    verified: true
+    note: 已与官方部署清单三处交叉验证
+  - id: F7
+    name: 代币地址
+    verified: true
+    note: 链上校验通过
+  - id: F8
+    name: 地域合规
+    verified: true
+    note: 参与方已确认符合
+  - id: F9
+    name: 反女巫规则
+    verified: n/a
+    note: 单地址运行，确认不受影响
+  - id: F10
+    name: 对冲通道
+    verified: n/a
+    note: 已决定不做对冲

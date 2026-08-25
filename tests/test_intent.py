@@ -1,0 +1,80 @@
+import json
+import sys
+import tempfile
+import unittest
+from dataclasses import replace
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from okxlp.exec.intent import Intent, IntentStatus, IntentStore, IntentStoreError
+
+
+TARGET = "0x" + "12" * 20
+
+
+class ReceiptRpc:
+    def __init__(self, receipts):
+        self.receipts = receipts
+        self.calls = []
+
+    def call(self, method, params):
+        self.calls.append((method, params))
+        return self.receipts.get(params[0])
+
+
+class IntentStoreTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+
+    def test_intent_has_unique_id_utc_time_and_round_trips(self):
+        first = Intent.create(TARGET, "0x88316456", value=7)
+        second = Intent.create(TARGET, "0x88316456")
+        store = IntentStore(self.root)
+
+        persisted = store.persist(first)
+        loaded = IntentStore(self.root).load(first.intent_id)
+
+        self.assertNotEqual(first.intent_id, second.intent_id)
+        self.assertIsNotNone(first.created_at.tzinfo)
+        self.assertEqual(persisted.status, IntentStatus.PERSISTED)
+        self.assertEqual(loaded, persisted)
+        self.assertEqual(json.loads(next(self.root.glob("*.json")).read_text())["value"], 7)
+
+    def test_same_id_is_idempotent_but_conflicting_content_is_rejected(self):
+        store = IntentStore(self.root)
+        intent = Intent.create(TARGET, "0x88316456")
+        persisted = store.persist(intent)
+
+        self.assertEqual(store.persist(intent), persisted)
+        with self.assertRaisesRegex(IntentStoreError, "内容冲突"):
+            store.persist(replace(intent, target="0x" + "34" * 20))
+
+    def test_restart_loads_pending_and_reconciles_receipts(self):
+        store = IntentStore(self.root)
+        successful = store.persist(Intent.create(TARGET, "0x88316456"))
+        failed = store.persist(Intent.create(TARGET, "0x88316456"))
+        unknown = store.persist(Intent.create(TARGET, "0x88316456"))
+        successful = store.save(
+            replace(successful, status=IntentStatus.SENT, tx_hash="0xaaa")
+        )
+        failed = store.save(replace(failed, status=IntentStatus.SENT, tx_hash="0xbbb"))
+        store.save(replace(unknown, status=IntentStatus.SIGNED, tx_hash="0xccc"))
+
+        restarted = IntentStore(self.root)
+        rpc = ReceiptRpc(
+            {"0xaaa": {"status": "0x1"}, "0xbbb": {"status": "0x0"}, "0xccc": None}
+        )
+        reconciled = {item.intent_id: item for item in restarted.reconcile_pending(rpc)}
+
+        self.assertEqual(reconciled[successful.intent_id].status, IntentStatus.CONFIRMED)
+        self.assertEqual(reconciled[failed.intent_id].status, IntentStatus.FAILED)
+        self.assertIn("链上交易执行失败", reconciled[failed.intent_id].error)
+        self.assertEqual(reconciled[unknown.intent_id].status, IntentStatus.SIGNED)
+        self.assertEqual(len(restarted.load_pending()), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

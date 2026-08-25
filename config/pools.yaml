@@ -1,0 +1,58 @@
+# 合格池注册表 —— 已链上校验的条目
+# 校验时间：2026-08-25，区块 68886709，脚本 tools/probe_pool.py
+# 校验方式：factory.getPool(token0, token1, fee) 反查结果与池地址一致
+
+chain:
+  id: 196
+  rpc:
+    - https://rpc.xlayer.tech
+  explorer: https://www.xlayerscan.com
+
+pools:
+  - id: wASMLx_USDC
+    enabled: true                  # F1 已从官方渠道确认
+    uniswap_version: v3
+    address: "0xc3d659028117f1ae5db9b9c68239b4a71f03ef37"
+    factory: "0x4b2ab38dbf28d31d467aa8993f6c2585981d6804"
+    token0:
+      symbol: wASMLx
+      name: Wrapped ASML xStock
+      address: "0x9147b03c16b18fc4f686f610f189f91ddf4347b4"
+      decimals: 18
+    token1:
+      symbol: USDC
+      address: "0xb6ceceab302e2e4948951ee7843fc24e92933061"
+      decimals: 6
+    fee_bps: 5                     # fee=500，即 0.05%
+    tick_spacing: 10
+
+    underlying: ASML
+    reference:
+      provider: yahoo_fx_adr
+      local_symbol: ASML.AS
+      fx_pair: EURUSD=X
+      cache_ttl_seconds: 60
+      max_staleness_seconds: 1800
+    # ASML 双重上市：Euronext Amsterdam 为主上市，NASDAQ ADR 为 1:1 对应
+    # 池价跟踪的是 USD 计价的 ADR，因此含 EUR/USD 汇率腿
+    listings:
+      - venue: Euronext Amsterdam
+        timezone: Europe/Amsterdam
+        hours_local: "09:00-17:40"
+      - venue: NASDAQ (ADR)
+        timezone: America/New_York
+        hours_local: "09:30-16:00"
+
+    # 2026-08-25 快照，用于仓位测算；运行时以实时读数为准
+    snapshot:
+      block: 68886709
+      price_usdc: 1770.77
+      pool_notional_usdc: 244600
+      active_liquidity_equiv_usdc_at_0p5pct: 2886
+
+session:
+  fx_sunday_open:
+    timezone: America/New_York
+    local_time: "17:00"
+    before_minutes: 30
+    after_minutes: 30

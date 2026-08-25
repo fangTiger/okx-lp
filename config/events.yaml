@@ -1,0 +1,7 @@
+# 财报事件使用 UTC 或带时区的 ISO 8601 时间；示例：
+# events:
+#   - type: earnings
+#     underlying: ASML
+#     published_at: "2026-10-14T05:00:00Z"
+# 当前活动窗口内无已知 ASML 财报。
+events: []

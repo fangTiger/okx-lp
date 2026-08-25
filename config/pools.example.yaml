@@ -1,0 +1,48 @@
+# 合格池注册表（示例）
+# 所有地址均需人工从官方渠道录入，程序启动时会做链上交叉校验，不符即拒绝启动。
+# 禁止填写未经核实的地址；xStocks 的 Solana 地址不可用于 X Layer。
+
+chain:
+  id: 196
+  rpc:
+    - https://rpc.xlayer.tech
+    # - <备用 RPC>
+  explorer: https://www.xlayerscan.com
+
+campaign:
+  name: "X Layer RWA Incentive Round 1"
+  track: rwa_stablecoin        # rwa_stablecoin | rwa_ecosystem
+  budget_usd: 200000
+  start: "2026-08-24T00:00:00Z"   # [待核实 F1]
+  end:   "2026-09-07T00:00:00Z"   # [待核实 F1]
+  settlement: hourly
+  # 预算在池间的分配规则；校准完成前保持 unknown，风控会限制仓位
+  budget_allocation: unknown      # unknown | equal | fee_weighted | tvl_weighted
+
+pools:
+  - id: TSLAX_USDC              # [待核实 F1] 是否在官方合格清单内
+    enabled: false
+    uniswap_version: v3         # v3 | v4，以官方清单为准
+    address: "0x..."            # [待核实 F1]
+    token0: { symbol: TSLAx, address: "0x...", decimals: 18 }  # [待核实 F7]
+    token1: { symbol: USDC,  address: "0x...", decimals: 6 }   # [待核实 F7]
+    fee_bps: 30
+    tick_spacing: 60
+    underlying: TSLA            # 对应美股标的，用于行情/日历/对冲
+    reference:
+      provider: yahoo_fx_adr
+      local_symbol: TSLA
+      fx_pair: EURUSD=X
+      cache_ttl_seconds: 60
+      max_staleness_seconds: 1800
+    listings:
+      - venue: NASDAQ
+        timezone: America/New_York
+        hours_local: "09:30-16:00"
+
+session:
+  fx_sunday_open:
+    timezone: America/New_York
+    local_time: "17:00"
+    before_minutes: 30
+    after_minutes: 30

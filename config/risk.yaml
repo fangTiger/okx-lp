@@ -1,0 +1,48 @@
+# 正式风控参数。当前仍保持 dry-run，后续里程碑再接入执行闸门。
+
+mode: dry_run
+
+outrange:
+  basis_jump_threshold: 0.004  # 基差相对 EWMA 突变阈值：0.4%
+  confirm_seconds: 180        # 参考价不可用时持续界外确认时间
+  pin_timeout: 600            # 插针挂起最长 10 分钟
+
+limits:
+  total_capital_usd: 0
+  max_pool_share: 0.40
+  probe_capital_usd: 2000
+  max_tx_value_usd: 20000
+  max_rebalances_per_day: 30
+  max_slippage_bps: 30
+
+swap:
+  min_amount_usd: 1
+  split_threshold_usd: 500
+  parts_min: 3
+  parts_max: 5
+  interval_seconds_min: 20
+  interval_seconds_max: 30
+
+circuit_breakers:
+  daily_loss_pct: 0.03
+  consecutive_tx_failures: 3
+  price_deviation_bps: 200
+  halt_file: log/HALT
+
+bandwidth:
+  k_sigma: 2.5
+  min_width_bps: 15
+  max_width_bps: 1000
+  preopen_min_width_bps: 300
+  event_min_width_bps: 600
+  event_calendar_fail_open: false
+
+hedge:
+  enabled: false
+  ratio: 1.0
+  deviation_tolerance: 0.10
+  max_cost_ratio: 0.30
+
+exit:
+  min_reward_density_hours: 6
+  campaign_end_buffer_hours: 12

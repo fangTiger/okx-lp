@@ -1,0 +1,48 @@
+# 风控参数（示例）。所有阈值均为保守默认，实盘前按资金规模复核。
+
+mode: dry_run                  # dry_run | manual_confirm | auto
+
+outrange:
+  basis_jump_threshold: 0.004  # 基差相对 EWMA 突变阈值：0.4%
+  confirm_seconds: 180         # 参考价不可用时持续界外确认时间
+  pin_timeout: 600             # 插针挂起最长 10 分钟
+
+limits:
+  total_capital_usd: 0         # 必须显式设置
+  max_pool_share: 0.40         # 单池本金不超过总资金比例
+  probe_capital_usd: 2000      # 规则校准完成前的单池上限
+  max_tx_value_usd: 20000
+  max_rebalances_per_day: 30     # 单池每日最多再平衡 30 次
+  max_slippage_bps: 30
+
+swap:
+  min_amount_usd: 1                 # 低于 1 USD 的 50/50 差额视为粉尘
+  split_threshold_usd: 500
+  parts_min: 3
+  parts_max: 5
+  interval_seconds_min: 20
+  interval_seconds_max: 30
+
+circuit_breakers:
+  daily_loss_pct: 0.03         # 单日亏损超总资金 3% -> 熔断撤出
+  consecutive_tx_failures: 3
+  price_deviation_bps: 200     # 链上价与标的现价偏离阈值，超出暂停开新仓
+  halt_file: log/HALT
+
+bandwidth:
+  k_sigma: 2.5
+  min_width_bps: 15            # 物理下界之上的安全余量
+  max_width_bps: 1000
+  preopen_min_width_bps: 300   # 开盘前 30 分钟保护
+  event_min_width_bps: 600     # 事件窗口 ±24h
+  event_calendar_fail_open: false   # 拉不到日历时按有事件处理
+
+hedge:
+  enabled: false               # [待核实 F10] 确认对冲通道后开启
+  ratio: 1.0
+  deviation_tolerance: 0.10
+  max_cost_ratio: 0.30         # 对冲成本超激励收益 30% -> 降比例并告警
+
+exit:
+  min_reward_density_hours: 6  # 奖励密度连续低于阈值的小时数
+  campaign_end_buffer_hours: 12

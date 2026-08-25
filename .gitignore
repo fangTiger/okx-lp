@@ -1,0 +1,19 @@
+# 虚拟环境与字节码
+.venv/
+__pycache__/
+*.py[cod]
+
+# 运行时数据与日志（含钱包地址、头寸快照，不入库）
+log/
+*.jsonl
+
+# 密钥与私密配置（绝不入库）
+config/secrets.env
+*keystore*.json
+UTC--*
+*.key
+
+# 本地状态
+state/
+intents/
+.DS_Store

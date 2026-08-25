@@ -1,0 +1,149 @@
+"""按 burn、collect、swap、mint 固定顺序执行一次再平衡。"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import tempfile
+import time
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, replace
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+from okxlp.exec.intent import Intent, IntentStatus
+from okxlp.strategy.allocation import (
+    BalanceSnapshot,
+    SwapRequirement,
+    calculate_50_50_swap,
+    load_min_swap_usd,
+    validate_min_swap_usd,
+)
+from okxlp.uniswap.swap import ScheduledSwap
+
+
+RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+class RebalanceError(RuntimeError):
+    """表示再平衡已安全中止。"""
+@dataclass(frozen=True)
+class RebalanceActions:
+    """按阶段延迟构造 Intent，确保失败后不生成后续意图。"""
+
+    burn: Callable[[], Intent]
+    collect: Callable[[], Intent]
+    read_balances: Callable[[], BalanceSnapshot]
+    build_swap: Callable[[SwapRequirement], tuple[ScheduledSwap, ...]]
+    mint: Callable[[], Intent]
+@dataclass(frozen=True)
+class RebalanceProgress:
+    """可原子持久化的再平衡进度。"""
+
+    rebalance_id: str
+    completed: tuple[str, ...] = ()
+    intent_ids: tuple[str, ...] = ()
+    failed_stage: str | None = None
+    error: str | None = None
+class RebalanceJournal:
+    """以每轮一个 JSON 文件记录已完成阶段。"""
+
+    def __init__(self, root: Path = Path("log/rebalances")) -> None:
+        self.root = root
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def path(self, rebalance_id: str) -> Path:
+        """返回经过路径穿越防护的进度文件路径。"""
+        if RUN_ID_PATTERN.fullmatch(rebalance_id) is None:
+            raise ValueError("rebalance_id 格式非法")
+        return self.root / f"{rebalance_id}.json"
+
+    def save(self, progress: RebalanceProgress) -> RebalanceProgress:
+        """原子写入进度，避免崩溃留下半截 JSON。"""
+        path = self.path(progress.rebalance_id)
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", dir=self.root,
+                prefix=".rebalance-", delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                json.dump(asdict(progress), handle, ensure_ascii=False, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except OSError as error:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+            raise RebalanceError(f"再平衡进度落盘失败：{error}") from None
+        return progress
+
+
+class RebalanceOrchestrator:
+    """逐阶段执行并在任何异常处记录后立即停止。"""
+
+    def __init__(
+        self, *, executor: Any, journal: RebalanceJournal,
+        sleep: Callable[[float], None] = time.sleep,
+        min_swap_usd: Decimal | str | None = None,
+        risk_path: Path = Path("config/risk.yaml"),
+    ) -> None:
+        self.executor = executor
+        self.journal = journal
+        self.sleep = sleep
+        self.min_swap_usd = (
+            load_min_swap_usd(risk_path)
+            if min_swap_usd is None else validate_min_swap_usd(min_swap_usd)
+        )
+
+    def execute(
+        self, actions: RebalanceActions, *, allow_broadcast: bool = False,
+        rebalance_id: str | None = None,
+    ) -> RebalanceProgress:
+        """强制四阶段顺序；默认仅 dry-run，不授予广播权限。"""
+        progress = self.journal.save(RebalanceProgress(rebalance_id or uuid4().hex))
+        stage = "burn"
+        try:
+            progress = self._run_stage(progress, stage, ((actions.burn(), 0),), allow_broadcast)
+            stage = "collect"
+            progress = self._run_stage(
+                progress, stage, ((actions.collect(), 0),), allow_broadcast
+            )
+            stage = "swap"
+            requirement = calculate_50_50_swap(
+                actions.read_balances(), self.min_swap_usd
+            )
+            swaps = () if requirement is None else actions.build_swap(requirement)
+            scheduled = tuple((item.intent, item.delay_seconds) for item in swaps)
+            progress = self._run_stage(progress, stage, scheduled, allow_broadcast)
+            stage = "mint"
+            progress = self._run_stage(progress, stage, ((actions.mint(), 0),), allow_broadcast)
+            return progress
+        except BaseException as error:
+            reason = str(error) or error.__class__.__name__
+            failed = replace(progress, failed_stage=stage, error=reason)
+            self.journal.save(failed)
+            raise RebalanceError(f"再平衡在 {stage} 阶段中止：{reason}") from error
+
+    def _run_stage(
+        self, progress: RebalanceProgress, stage: str,
+        scheduled: tuple[tuple[Intent, int], ...], allow_broadcast: bool,
+    ) -> RebalanceProgress:
+        ids = []
+        expected = IntentStatus.CONFIRMED if allow_broadcast else IntentStatus.DRY_RUN
+        for intent, delay in scheduled:
+            if delay:
+                self.sleep(delay)
+            result = self.executor.execute(intent, allow_broadcast=allow_broadcast)
+            if result.intent.status != expected:
+                raise RebalanceError(
+                    f"Intent {intent.intent_id} 状态为 {result.intent.status.value}，期望 {expected.value}"
+                )
+            ids.append(intent.intent_id)
+        updated = replace(
+            progress, completed=progress.completed + (stage,),
+            intent_ids=progress.intent_ids + tuple(ids),
+        )
+        return self.journal.save(updated)
