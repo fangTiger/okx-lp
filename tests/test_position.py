@@ -45,23 +45,6 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(values[3:5], (-201580, -201470))
         self.assertEqual(values[5:9], (10**15, 1_000_000, 990_000_000_000_000, 990_000))
 
-    def test_increase_liquidity_builds_independent_intent(self):
-        intent = self.manager.increase_liquidity(
-            token_id=7,
-            amount0_desired=10,
-            amount1_desired=20,
-            amount0_min=9,
-            amount1_min=18,
-            deadline=2_000_000_000,
-        )
-
-        values = decode(
-            ["(uint256,uint256,uint256,uint256,uint256,uint256)"],
-            bytes.fromhex(intent.calldata[10:]),
-        )[0]
-        self.assertEqual(intent.calldata[:10], "0x219f5d17")
-        self.assertEqual(values, (7, 10, 20, 9, 18, 2_000_000_000))
-
     def test_decrease_liquidity_builds_burn_stage_intent(self):
         intent = self.manager.decrease_liquidity(
             token_id=7,

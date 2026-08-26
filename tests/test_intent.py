@@ -1,4 +1,5 @@
 import json
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -29,6 +30,18 @@ class IntentStoreTest(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
 
+    @staticmethod
+    def _signed(store, intent):
+        simulated = store.save(replace(intent, status=IntentStatus.SIMULATED))
+        return store.save(
+            replace(simulated, status=IntentStatus.SIGNED, tx_hash="0x" + "11" * 32)
+        )
+
+    @classmethod
+    def _sent(cls, store, intent, tx_hash):
+        signed = cls._signed(store, intent)
+        return store.save(replace(signed, status=IntentStatus.SENT, tx_hash=tx_hash))
+
     def test_intent_has_unique_id_utc_time_and_round_trips(self):
         first = Intent.create(TARGET, "0x88316456", value=7)
         second = Intent.create(TARGET, "0x88316456")
@@ -41,7 +54,13 @@ class IntentStoreTest(unittest.TestCase):
         self.assertIsNotNone(first.created_at.tzinfo)
         self.assertEqual(persisted.status, IntentStatus.PERSISTED)
         self.assertEqual(loaded, persisted)
-        self.assertEqual(json.loads(next(self.root.glob("*.json")).read_text())["value"], 7)
+        data = json.loads(next(self.root.glob("*.json")).read_text())
+        self.assertEqual(data["value"], 7)
+        content_hash = data.pop("content_hash")
+        canonical = json.dumps(
+            data, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        )
+        self.assertEqual(content_hash, hashlib.sha256(canonical.encode()).hexdigest())
 
     def test_same_id_is_idempotent_but_conflicting_content_is_rejected(self):
         store = IntentStore(self.root)
@@ -57,11 +76,9 @@ class IntentStoreTest(unittest.TestCase):
         successful = store.persist(Intent.create(TARGET, "0x88316456"))
         failed = store.persist(Intent.create(TARGET, "0x88316456"))
         unknown = store.persist(Intent.create(TARGET, "0x88316456"))
-        successful = store.save(
-            replace(successful, status=IntentStatus.SENT, tx_hash="0xaaa")
-        )
-        failed = store.save(replace(failed, status=IntentStatus.SENT, tx_hash="0xbbb"))
-        store.save(replace(unknown, status=IntentStatus.SIGNED, tx_hash="0xccc"))
+        successful = self._sent(store, successful, "0xaaa")
+        failed = self._sent(store, failed, "0xbbb")
+        self._signed(store, replace(unknown, tx_hash="0xccc"))
 
         restarted = IntentStore(self.root)
         rpc = ReceiptRpc(
@@ -74,6 +91,42 @@ class IntentStoreTest(unittest.TestCase):
         self.assertIn("链上交易执行失败", reconciled[failed.intent_id].error)
         self.assertEqual(reconciled[unknown.intent_id].status, IntentStatus.SIGNED)
         self.assertEqual(len(restarted.load_pending()), 1)
+
+    def test_load_rejects_tampered_content_hash(self):
+        store = IntentStore(self.root)
+        intent = store.persist(Intent.create(TARGET, "0x88316456"))
+        path = self.root / f"{intent.intent_id}.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["value"] = 123456789
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+        with self.assertRaisesRegex(IntentStoreError, "落盘内容完整性校验失败"):
+            IntentStore(self.root).load(intent.intent_id)
+
+    def test_illegal_status_transitions_are_rejected(self):
+        store = IntentStore(self.root)
+        persisted = store.persist(Intent.create(TARGET, "0x88316456"))
+        with self.assertRaises(IntentStoreError):
+            store.save(replace(persisted, status=IntentStatus.CONFIRMED))
+        self.assertEqual(store.load(persisted.intent_id).status, IntentStatus.PERSISTED)
+
+        confirmed = self._sent(store, persisted, "0xaaa")
+        confirmed = store.save(replace(confirmed, status=IntentStatus.CONFIRMED))
+        with self.assertRaises(IntentStoreError):
+            store.save(replace(confirmed, status=IntentStatus.SENT))
+
+        dry = store.persist(Intent.create(TARGET, "0x88316456"))
+        dry = self._signed(store, dry)
+        dry = store.save(replace(dry, status=IntentStatus.DRY_RUN))
+        with self.assertRaises(IntentStoreError):
+            store.save(replace(dry, status=IntentStatus.SENT))
+
+    def test_same_status_save_is_rejected(self):
+        store = IntentStore(self.root)
+        persisted = store.persist(Intent.create(TARGET, "0x88316456"))
+
+        with self.assertRaises(IntentStoreError):
+            store.save(persisted)
 
 
 if __name__ == "__main__":

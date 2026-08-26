@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from dataclasses import replace
 from decimal import Decimal
@@ -14,8 +15,9 @@ from okxlp.campaign.verifier import (
     main,
     verify_campaign,
 )
+from okxlp.campaign.gate import load_fact_gate
 from okxlp.config import load_config
-from okxlp.exec.authorization import AuthorizationError, RunMode
+from okxlp.exec.authorization import AuthorizationError, RunMode, load_run_mode
 from okxlp.uniswap.pool import PoolSnapshot, TokenMetadata
 
 
@@ -123,7 +125,7 @@ class CampaignVerifierTest(unittest.TestCase):
     def test_main_reports_real_live_mode(self):
         startup_result = (
             VerificationReport(("wASMLx_USDC",), 68886709),
-            SimpleNamespace(forced_dry_run=True),
+            SimpleNamespace(forced_dry_run=False),
         )
         with (
             patch("sys.argv", ["verifier"]),
@@ -138,6 +140,49 @@ class CampaignVerifierTest(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertIn("模式=live（可请求实盘）", "\n".join(logs.output))
+
+    def test_live_mode_with_fact_blocker_never_reports_live_permission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            risk_path = root / "risk.yaml"
+            facts_path = root / "facts.yaml"
+            risk_path.write_text("mode: live\n", encoding="utf-8")
+            facts_path.write_text(
+                "facts:\n"
+                "  - id: F8\n"
+                "    name: 地域合规\n"
+                "    verified: false\n"
+                "    blocks: live\n",
+                encoding="utf-8",
+            )
+            run_mode = load_run_mode(risk_path)
+            gate = load_fact_gate(facts_path)
+            startup_result = (
+                VerificationReport(("wASMLx_USDC",), 68886709), gate,
+            )
+            with (
+                patch("sys.argv", ["verifier"]),
+                patch(
+                    "okxlp.campaign.verifier.run_startup",
+                    return_value=startup_result,
+                ),
+                patch(
+                    "okxlp.campaign.verifier.load_run_mode",
+                    return_value=run_mode,
+                ),
+                self.assertLogs(
+                    "okxlp.campaign.verifier", level="INFO"
+                ) as logs,
+            ):
+                result = main()
+
+        output = "\n".join(logs.output)
+        self.assertEqual(result, 0)
+        self.assertIn(
+            "模式=dry_run（事实闸门强制：存在 live 级未核实事实）",
+            output,
+        )
+        self.assertNotIn("可请求实盘", output)
 
     def test_main_fails_before_rpc_when_run_mode_cannot_be_loaded(self):
         with (

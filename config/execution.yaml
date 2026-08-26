@@ -31,7 +31,6 @@ whitelist:
       address: "0x315e413a11ab0df498ef83873012430ca36638ae"
       selectors:
         mint: "0x88316456"
-        increaseLiquidity: "0x219f5d17"
         decreaseLiquidity: "0x0c49ccbe"
         collect: "0xfc6f7865"
         burn: "0x42966c68"

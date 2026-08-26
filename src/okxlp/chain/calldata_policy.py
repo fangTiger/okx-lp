@@ -1,0 +1,331 @@
+"""白名单交易 calldata 的 ABI 参数级安全策略。"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from typing import Any
+
+import yaml
+from eth_abi import decode
+
+from okxlp.config_validation import ConfigError, address as validate_address
+
+
+MINT = (
+    "0x88316456",
+    "(address,address,uint24,int24,int24,uint256,uint256,uint256,uint256,address,uint256)",
+    11,
+)
+DECREASE = ("0x0c49ccbe", "(uint256,uint128,uint256,uint256,uint256)", 5)
+COLLECT = ("0xfc6f7865", "(uint256,address,uint128,uint128)", 4)
+BURN = ("0x42966c68", "uint256", 1)
+SWAP = ("0x04e45aaf", "(address,address,uint24,address,uint256,uint256,uint160)", 7)
+
+
+class CalldataPolicyError(ValueError):
+    """表示 calldata 的目标、ABI 或参数不符合资金安全策略。"""
+
+
+def _read_mapping(path: Path, label: str) -> dict[str, Any]:
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as error:
+        raise CalldataPolicyError(f"无法读取{label} {path}：{error}") from error
+    if type(data) is not dict:
+        raise CalldataPolicyError(f"{label}根节点必须是映射")
+    return data
+
+
+def _required(data: dict[str, Any], key: str, path: str) -> Any:
+    if key not in data:
+        raise CalldataPolicyError(f"{path}.{key} 缺少必填字段")
+    return data[key]
+
+
+def _mapping(value: Any, path: str) -> dict[str, Any]:
+    if type(value) is not dict:
+        raise CalldataPolicyError(f"{path} 类型不符：应为映射")
+    return value
+
+
+def _address(value: Any, path: str) -> str:
+    try:
+        return validate_address(value, path)
+    except ConfigError as error:
+        raise CalldataPolicyError(str(error)) from None
+
+
+@dataclass(frozen=True)
+class CalldataPolicy:
+    """把允许的方法进一步收窄到唯一池、收款人和头寸集合。"""
+
+    executor_address: str
+    npm_address: str
+    router_address: str
+    token0: str
+    token1: str
+    fee: int
+    allowed_token_ids: frozenset[int]
+    max_deadline_seconds: int = 3600
+
+    def __post_init__(self) -> None:
+        for field in (
+            "executor_address", "npm_address", "router_address", "token0", "token1"
+        ):
+            object.__setattr__(self, field, _address(getattr(self, field), field))
+        if type(self.fee) is not int or self.fee <= 0:
+            raise CalldataPolicyError(f"fee 必须是正整数，实际值={self.fee}")
+        if type(self.max_deadline_seconds) is not int or self.max_deadline_seconds <= 0:
+            raise CalldataPolicyError(
+                "max_deadline_seconds 必须是正整数，"
+                f"实际值={self.max_deadline_seconds}"
+            )
+        try:
+            token_ids = frozenset(self.allowed_token_ids)
+        except TypeError:
+            raise CalldataPolicyError("allowed_token_ids 必须是可迭代的整数集合") from None
+        for token_id in token_ids:
+            if type(token_id) is not int or token_id < 0:
+                raise CalldataPolicyError(
+                    f"allowed_token_ids 只能包含非负整数，实际值={token_id}"
+                )
+        object.__setattr__(self, "allowed_token_ids", token_ids)
+
+    @classmethod
+    def from_config(
+        cls, execution_path: Path, pools_path: Path, *, executor_address: str,
+        allowed_token_ids: Any,
+    ) -> "CalldataPolicy":
+        """从执行配置和匹配的池配置严格构造参数策略。"""
+        execution = _read_mapping(execution_path, "执行配置")
+        addresses = _mapping(
+            _required(execution, "addresses", "执行配置"), "execution.addresses"
+        )
+        pool_address = _address(
+            _required(addresses, "pool", "execution.addresses"),
+            "execution.addresses.pool",
+        )
+        npm_address = _required(addresses, "npm", "execution.addresses")
+        router_address = _required(
+            addresses, "swap_router02", "execution.addresses"
+        )
+
+        root = _read_mapping(pools_path, "池配置")
+        pools = _required(root, "pools", "池配置")
+        if type(pools) is not list or not pools:
+            raise CalldataPolicyError("pools 必须是非空列表")
+        selected = None
+        for index, raw in enumerate(pools):
+            pool = _mapping(raw, f"pools[{index}]")
+            candidate = _address(
+                _required(pool, "address", f"pools[{index}]"),
+                f"pools[{index}].address",
+            )
+            if candidate == pool_address:
+                selected = (index, pool)
+                break
+        if selected is None:
+            raise CalldataPolicyError(
+                f"池配置中找不到 execution.addresses.pool={pool_address}"
+            )
+        index, pool = selected
+        token0 = _mapping(
+            _required(pool, "token0", f"pools[{index}]"), f"pools[{index}].token0"
+        )
+        token1 = _mapping(
+            _required(pool, "token1", f"pools[{index}]"), f"pools[{index}].token1"
+        )
+        raw_fee = _required(pool, "fee_bps", f"pools[{index}]")
+        if type(raw_fee) not in (int, float):
+            raise CalldataPolicyError(
+                f"pools[{index}].fee_bps 必须是数值，实际值={raw_fee}"
+            )
+        try:
+            fee_units = Decimal(str(raw_fee)) * Decimal(100)
+        except InvalidOperation:
+            raise CalldataPolicyError(
+                f"pools[{index}].fee_bps 不是有效数值，实际值={raw_fee}"
+            ) from None
+        if fee_units != fee_units.to_integral_value():
+            raise CalldataPolicyError(
+                f"pools[{index}].fee_bps 无法精确换算为 fee，实际值={raw_fee}"
+            )
+        return cls(
+            executor_address=executor_address,
+            npm_address=npm_address,
+            router_address=router_address,
+            token0=_required(token0, "address", f"pools[{index}].token0"),
+            token1=_required(token1, "address", f"pools[{index}].token1"),
+            fee=int(fee_units),
+            allowed_token_ids=frozenset(allowed_token_ids),
+        )
+
+    def validate(
+        self, *, target: str, calldata: str, value: int, now_ts: int
+    ) -> None:
+        """完整解码并校验一笔白名单调用的全部安全关键参数。"""
+        if type(value) is not int or value != 0:
+            raise CalldataPolicyError(
+                f"value 不合规：期望值=0，实际值={value}"
+            )
+        if type(now_ts) is not int:
+            raise CalldataPolicyError(
+                f"now_ts 不合规：期望整数时间戳，实际值={now_ts}"
+            )
+        normalized_target = _address(
+            target.lower() if type(target) is str else target, "target"
+        )
+        if type(calldata) is not str or not calldata.startswith("0x"):
+            raise CalldataPolicyError(f"calldata 格式非法，实际值={calldata}")
+        encoded = calldata[2:]
+        if re.fullmatch(r"[0-9a-fA-F]*", encoded) is None:
+            raise CalldataPolicyError(
+                f"calldata 不是连续有效十六进制，实际值={calldata}"
+            )
+        try:
+            raw = bytes.fromhex(encoded)
+        except ValueError:
+            raise CalldataPolicyError(f"calldata 不是有效十六进制，实际值={calldata}") from None
+        if len(raw) < 4:
+            raise CalldataPolicyError(
+                f"calldata 长度不足：期望至少 4 字节，实际值={len(raw)} 字节"
+            )
+        selector = "0x" + raw[:4].hex()
+        dispatch = self._dispatch(normalized_target, selector)
+        abi_type, slots, validator = dispatch
+        payload = raw[4:]
+        expected_size = slots * 32
+        if len(payload) != expected_size:
+            kind = "包含多余尾随字节" if len(payload) > expected_size else "长度不足"
+            raise CalldataPolicyError(
+                f"calldata {kind}：期望参数长度={expected_size} 字节，"
+                f"实际值={len(payload)} 字节"
+            )
+        try:
+            decoded = decode([abi_type], payload, strict=True)[0]
+        except Exception as error:
+            raise CalldataPolicyError(f"calldata 无法按 ABI 完整解码：{error}") from None
+        validator(decoded, now_ts)
+
+    def _dispatch(self, target: str, selector: str) -> tuple[str, int, Any]:
+        routes = {
+            (self.npm_address, MINT[0]): (MINT[1], MINT[2], self._validate_mint),
+            (self.npm_address, DECREASE[0]): (
+                DECREASE[1], DECREASE[2], self._validate_decrease
+            ),
+            (self.npm_address, COLLECT[0]): (
+                COLLECT[1], COLLECT[2], self._validate_collect
+            ),
+            (self.npm_address, BURN[0]): (BURN[1], BURN[2], self._validate_burn),
+            (self.router_address, SWAP[0]): (SWAP[1], SWAP[2], self._validate_swap),
+        }
+        try:
+            return routes[(target, selector)]
+        except KeyError:
+            raise CalldataPolicyError(
+                "目标地址与方法选择器组合不在参数策略中："
+                f"target={target}，selector={selector}"
+            ) from None
+
+    @staticmethod
+    def _equal(name: str, actual: Any, expected: Any) -> None:
+        if actual != expected:
+            raise CalldataPolicyError(
+                f"{name} 不合规：期望值={expected}，实际值={actual}"
+            )
+
+    def _deadline(self, deadline: Any, now_ts: int) -> None:
+        maximum = now_ts + self.max_deadline_seconds
+        if type(deadline) is not int or not 0 < deadline <= maximum:
+            raise CalldataPolicyError(
+                f"deadline 不合规：期望范围=1..{maximum}，实际值={deadline}"
+            )
+
+    def _token_id(self, token_id: Any) -> None:
+        if token_id not in self.allowed_token_ids:
+            raise CalldataPolicyError(
+                "tokenId 不合规："
+                f"期望属于={sorted(self.allowed_token_ids)}，实际值={token_id}"
+            )
+
+    def _validate_mint(self, values: tuple[Any, ...], now_ts: int) -> None:
+        (
+            token0, token1, fee, tick_lower, tick_upper,
+            amount0_desired, amount1_desired, amount0_min, amount1_min,
+            recipient, deadline,
+        ) = values
+        self._equal("token0", token0.lower(), self.token0)
+        self._equal("token1", token1.lower(), self.token1)
+        self._equal("fee", fee, self.fee)
+        self._equal("recipient", recipient.lower(), self.executor_address)
+        if (
+            type(tick_lower) is not int
+            or type(tick_upper) is not int
+            or tick_lower >= tick_upper
+        ):
+            raise CalldataPolicyError(
+                "tick 范围不合规：期望 tickLower < tickUpper，"
+                f"实际值=({tick_lower}, {tick_upper})"
+            )
+        self._deadline(deadline, now_ts)
+        for name, amount in (
+            ("amount0Desired", amount0_desired),
+            ("amount1Desired", amount1_desired),
+            ("amount0Min", amount0_min),
+            ("amount1Min", amount1_min),
+        ):
+            if type(amount) is not int or amount < 0:
+                raise CalldataPolicyError(
+                    f"{name} 不合规：期望非负整数，实际值={amount}"
+                )
+
+    def _validate_decrease(self, values: tuple[Any, ...], now_ts: int) -> None:
+        token_id, liquidity, _amount0_min, _amount1_min, deadline = values
+        self._token_id(token_id)
+        if type(liquidity) is not int or liquidity <= 0:
+            raise CalldataPolicyError(
+                f"liquidity 不合规：期望正整数，实际值={liquidity}"
+            )
+        self._deadline(deadline, now_ts)
+
+    def _validate_collect(self, values: tuple[Any, ...], _now_ts: int) -> None:
+        token_id, recipient, _amount0_max, _amount1_max = values
+        self._token_id(token_id)
+        self._equal("recipient", recipient.lower(), self.executor_address)
+
+    def _validate_burn(self, token_id: int, _now_ts: int) -> None:
+        self._token_id(token_id)
+
+    def _validate_swap(self, values: tuple[Any, ...], _now_ts: int) -> None:
+        (
+            token_in, token_out, fee, recipient, amount_in,
+            amount_out_minimum, _sqrt_price_limit_x96,
+        ) = values
+        token_in, token_out = token_in.lower(), token_out.lower()
+        allowed = frozenset((self.token0, self.token1))
+        if token_in not in allowed:
+            raise CalldataPolicyError(
+                f"tokenIn 不合规：期望属于={sorted(allowed)}，实际值={token_in}"
+            )
+        if token_out not in allowed:
+            raise CalldataPolicyError(
+                f"tokenOut 不合规：期望属于={sorted(allowed)}，实际值={token_out}"
+            )
+        if token_in == token_out:
+            raise CalldataPolicyError(
+                f"tokenIn 与 tokenOut 不合规：期望两者不同，实际值={token_in}"
+            )
+        self._equal("fee", fee, self.fee)
+        self._equal("recipient", recipient.lower(), self.executor_address)
+        if type(amount_in) is not int or amount_in <= 0:
+            raise CalldataPolicyError(
+                f"amountIn 不合规：期望正整数，实际值={amount_in}"
+            )
+        if type(amount_out_minimum) is not int or amount_out_minimum <= 0:
+            raise CalldataPolicyError(
+                "amountOutMinimum 不合规："
+                f"期望正整数，实际值={amount_out_minimum}"
+            )

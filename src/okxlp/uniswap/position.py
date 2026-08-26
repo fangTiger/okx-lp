@@ -17,10 +17,6 @@ MINT = (
     "mint((address,address,uint24,int24,int24,uint256,uint256,uint256,uint256,address,uint256))",
     "(address,address,uint24,int24,int24,uint256,uint256,uint256,uint256,address,uint256)",
 )
-INCREASE = (
-    "increaseLiquidity((uint256,uint256,uint256,uint256,uint256,uint256))",
-    "(uint256,uint256,uint256,uint256,uint256,uint256)",
-)
 DECREASE = (
     "decreaseLiquidity((uint256,uint128,uint256,uint256,uint256))",
     "(uint256,uint128,uint256,uint256,uint256)",
@@ -63,17 +59,6 @@ class PositionManager:
             recipient, deadline,
         )
         return Intent.create(self.address, _calldata(MINT, values), value=value)
-
-    def increase_liquidity(
-        self, *, token_id: int, amount0_desired: int, amount1_desired: int,
-        amount0_min: int, amount1_min: int, deadline: int, value: int = 0,
-    ) -> Intent:
-        """构造 increaseLiquidity Intent。"""
-        values = (
-            token_id, amount0_desired, amount1_desired,
-            amount0_min, amount1_min, deadline,
-        )
-        return Intent.create(self.address, _calldata(INCREASE, values), value=value)
 
     def decrease_liquidity(
         self, *, token_id: int, liquidity: int, amount0_min: int,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -38,6 +39,32 @@ TERMINAL_STATUSES = frozenset(
     {IntentStatus.CONFIRMED, IntentStatus.FAILED, IntentStatus.DRY_RUN}
 )
 
+ALLOWED_TRANSITIONS = {
+    IntentStatus.CREATED: frozenset({IntentStatus.PERSISTED}),
+    IntentStatus.PERSISTED: frozenset(
+        {IntentStatus.SIMULATED, IntentStatus.FAILED}
+    ),
+    IntentStatus.SIMULATED: frozenset(
+        {IntentStatus.SIGNED, IntentStatus.FAILED}
+    ),
+    IntentStatus.SIGNED: frozenset(
+        {IntentStatus.SENT, IntentStatus.DRY_RUN, IntentStatus.FAILED}
+    ),
+    IntentStatus.SENT: frozenset(
+        {IntentStatus.CONFIRMED, IntentStatus.FAILED}
+    ),
+    IntentStatus.CONFIRMED: frozenset(),
+    IntentStatus.FAILED: frozenset(),
+    IntentStatus.DRY_RUN: frozenset(),
+}
+
+
+def _content_hash(data: dict[str, Any]) -> str:
+    canonical = json.dumps(
+        data, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
 
 class RpcLike(Protocol):
     """Intent 恢复所需的最小 RPC 接口。"""
@@ -72,19 +99,26 @@ class Intent:
         data = asdict(self)
         data["created_at"] = self.created_at.isoformat()
         data["status"] = self.status.value
+        data["content_hash"] = _content_hash(data)
         return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Intent":
         """从持久化 JSON 结构恢复 Intent。"""
+        if type(data) is not dict:
+            raise IntentStoreError("Intent 持久化内容格式非法")
+        payload = dict(data)
+        actual_hash = payload.pop("content_hash", None)
+        if actual_hash != _content_hash(payload):
+            raise IntentStoreError("Intent 落盘内容完整性校验失败")
         try:
             return cls(
-                intent_id=data["intent_id"], target=data["target"],
-                calldata=data["calldata"], value=data["value"],
-                created_at=datetime.fromisoformat(data["created_at"]),
-                status=IntentStatus(data["status"]), nonce=data.get("nonce"),
-                tx_hash=data.get("tx_hash"), error=data.get("error"),
-                transaction=data.get("transaction"),
+                intent_id=payload["intent_id"], target=payload["target"],
+                calldata=payload["calldata"], value=payload["value"],
+                created_at=datetime.fromisoformat(payload["created_at"]),
+                status=IntentStatus(payload["status"]), nonce=payload.get("nonce"),
+                tx_hash=payload.get("tx_hash"), error=payload.get("error"),
+                transaction=payload.get("transaction"),
             )
         except (KeyError, TypeError, ValueError):
             raise IntentStoreError("Intent 持久化内容格式非法") from None
@@ -117,6 +151,12 @@ class IntentStore:
             if self._identity(stored) != self._identity(intent):
                 raise IntentStoreError(f"Intent {intent.intent_id} 内容冲突")
             return stored
+        if intent.status is not IntentStatus.CREATED:
+            raise IntentStoreError(
+                "Intent 状态转移非法："
+                f"期望={IntentStatus.CREATED.value} -> {IntentStatus.PERSISTED.value}，"
+                f"实际起点={intent.status.value}"
+            )
         persisted = replace(intent, status=IntentStatus.PERSISTED)
         self._write(persisted)
         return persisted
@@ -125,8 +165,34 @@ class IntentStore:
         """保存已持久化 Intent 的后续状态。"""
         if not self._path(intent.intent_id).exists():
             raise IntentStoreError("Intent 尚未首次落盘，拒绝更新状态")
+        stored = self.load(intent.intent_id)
+        if self._identity(stored) != self._identity(intent):
+            raise IntentStoreError(f"Intent {intent.intent_id} 内容冲突")
+        allowed = ALLOWED_TRANSITIONS[stored.status]
+        if intent.status not in allowed:
+            expected = ", ".join(status.value for status in sorted(allowed, key=str))
+            raise IntentStoreError(
+                "Intent 状态转移非法："
+                f"{stored.status.value} -> {intent.status.value}；"
+                f"允许目标={expected or '无（终态）'}"
+            )
         self._write(intent)
         return intent
+
+    def _record_integrity_failure(self, intent: Intent) -> Intent:
+        """用已校验的内存 Intent 原子替换无法信任的损坏落盘记录。"""
+        if not self._path(intent.intent_id).exists():
+            raise IntentStoreError("Intent 尚未首次落盘，拒绝记录完整性失败")
+        failed = replace(
+            intent,
+            status=IntentStatus.FAILED,
+            nonce=None,
+            tx_hash=None,
+            error="Intent 落盘内容完整性校验失败",
+            transaction=None,
+        )
+        self._write(failed)
+        return failed
 
     def _write(self, intent: Intent) -> None:
         path = self._path(intent.intent_id)
@@ -169,7 +235,7 @@ class IntentStore:
         """重启时用交易回执核对未完成 Intent，并持久化终态。"""
         reconciled = []
         for intent in self.load_pending():
-            if not intent.tx_hash:
+            if intent.status is not IntentStatus.SENT or not intent.tx_hash:
                 reconciled.append(intent)
                 continue
             receipt = rpc.call("eth_getTransactionReceipt", [intent.tx_hash])

@@ -11,8 +11,11 @@ from typing import Any, Protocol
 
 from eth_utils import keccak, to_checksum_address
 
+from okxlp.chain.calldata_policy import CalldataPolicy
 from okxlp.exec.authorization import require_broadcast_flag
-from okxlp.exec.intent import Intent, IntentStatus, IntentStore, TERMINAL_STATUSES
+from okxlp.exec.intent import (
+    Intent, IntentStatus, IntentStore, IntentStoreError, TERMINAL_STATUSES,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -45,17 +48,20 @@ class TransactionExecutor:
 
     def __init__(
         self, *, rpc: RpcLike, signer: Any, nonce_manager: Any,
-        gas_estimator: Any, whitelist: Any, store: IntentStore,
+        gas_estimator: Any, whitelist: Any, calldata_policy: CalldataPolicy,
+        store: IntentStore,
         chain_id: int, printer: Callable[[str], None] = print,
         confirmation_timeout: float = 120.0, poll_interval: float = 2.0,
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
+        clock: Callable[[], int] = lambda: int(time.time()),
     ) -> None:
         self.rpc = rpc
         self.signer = signer
         self.nonce_manager = nonce_manager
         self.gas_estimator = gas_estimator
         self.whitelist = whitelist
+        self.calldata_policy = calldata_policy
         self.store = store
         self.chain_id = chain_id
         self.printer = printer
@@ -63,43 +69,35 @@ class TransactionExecutor:
         self.poll_interval = poll_interval
         self.sleep = sleep
         self.monotonic = monotonic
+        self.clock = clock
 
-    def execute(self, intent: Intent, *, allow_broadcast: bool = False) -> ExecutionResult:
+    def execute(
+        self, intent: Intent, *, allow_broadcast: bool = False
+    ) -> ExecutionResult:
         """执行安全流水线；只有显式授权时才调用广播函数。"""
         broadcast = require_broadcast_flag(allow_broadcast)
-        LOGGER.info("Intent %s 开始白名单校验", intent.intent_id)
+        self._validate_intent(intent)
         try:
-            selector = self.whitelist.validate(intent.target, intent.calldata)
-        except Exception as error:
-            LOGGER.error("Intent %s 白名单拒绝：%s", intent.intent_id, error)
+            current = self.store.persist(intent)
+        except IntentStoreError as error:
+            if str(error) == "Intent 落盘内容完整性校验失败":
+                self.store._record_integrity_failure(intent)
+                LOGGER.error("Intent %s 落盘内容完整性校验失败", intent.intent_id)
             raise
-        LOGGER.info("Intent %s 白名单校验通过：%s", intent.intent_id, selector)
-        current = self.store.persist(intent)
         LOGGER.info("Intent %s 已落盘：%s", intent.intent_id, current.status.value)
         if current.status in TERMINAL_STATUSES:
             LOGGER.info("Intent %s 已是终态，幂等返回", intent.intent_id)
             return ExecutionResult(current, current.transaction or {})
         if current.status == IntentStatus.SENT:
             return self._resume_sent(current)
-        if current.status == IntentStatus.SIGNED and current.transaction:
-            return self._finish_signed(current, broadcast)
+        if current.status == IntentStatus.SIGNED:
+            return self._resume_signed(current, broadcast)
 
-        rpc_transaction = {
-            "from": self.signer.address, "to": intent.target,
-            "data": intent.calldata, "value": hex(intent.value),
-        }
-        LOGGER.info("Intent %s 开始 eth_call 模拟", intent.intent_id)
-        try:
-            self.rpc.call("eth_call", [rpc_transaction, "pending"])
-        except Exception as error:
-            reason = str(error) or error.__class__.__name__
-            self.store.save(
-                replace(current, status=IntentStatus.FAILED, error=f"模拟回滚：{reason}")
-            )
-            LOGGER.error("Intent %s 模拟回滚，中止执行：%s", intent.intent_id, reason)
-            raise ExecutionError(f"交易模拟回滚：{reason}") from None
-        current = self.store.save(replace(current, status=IntentStatus.SIMULATED))
-        LOGGER.info("Intent %s eth_call 模拟通过", intent.intent_id)
+        current = self._simulate(
+            intent, current,
+            persist_success=current.status is IntentStatus.PERSISTED,
+        )
+        rpc_transaction = self._rpc_transaction(intent)
 
         try:
             quote = self.gas_estimator.estimate(rpc_transaction)
@@ -117,27 +115,112 @@ class TransactionExecutor:
                 "maxFeePerGas": quote.max_fee_per_gas,
                 "maxPriorityFeePerGas": quote.max_priority_fee_per_gas, "type": 2,
             }
+            candidate = replace(
+                current, status=IntentStatus.SIGNED, nonce=nonce,
+                transaction=transaction,
+            )
+        except Exception as error:
+            reason = str(error) or error.__class__.__name__
+            self.store.save(replace(current, status=IntentStatus.FAILED, error=reason))
+            LOGGER.error(
+                "Intent %s gas、nonce 或交易构造步骤失败：%s",
+                intent.intent_id, reason,
+            )
+            raise ExecutionError(f"交易准备失败：{reason}") from None
+        self._assert_transaction_matches_intent(candidate)
+        try:
             raw = self.signer.sign_transaction(transaction)
         except Exception as error:
             reason = str(error) or error.__class__.__name__
             self.store.save(replace(current, status=IntentStatus.FAILED, error=reason))
-            LOGGER.error("Intent %s gas、nonce 或签名步骤失败：%s", intent.intent_id, reason)
+            LOGGER.error("Intent %s 签名步骤失败：%s", intent.intent_id, reason)
             raise ExecutionError(f"交易准备失败：{reason}") from None
         tx_hash = "0x" + keccak(raw).hex()
         current = self.store.save(
             replace(
-                current, status=IntentStatus.SIGNED, nonce=nonce,
+                candidate,
                 tx_hash=tx_hash, transaction=transaction,
             )
         )
         LOGGER.info("Intent %s 签名完成，预期交易哈希：%s", intent.intent_id, tx_hash)
         return self._finish_signed(current, broadcast, raw)
 
+    def _validate_intent(self, intent: Intent) -> None:
+        LOGGER.info("Intent %s 开始白名单校验", intent.intent_id)
+        try:
+            selector = self.whitelist.validate(intent.target, intent.calldata)
+        except Exception as error:
+            self._record_existing_validation_failure(intent, error)
+            LOGGER.error("Intent %s 白名单拒绝：%s", intent.intent_id, error)
+            raise
+        LOGGER.info("Intent %s 白名单校验通过：%s", intent.intent_id, selector)
+        LOGGER.info("Intent %s 开始 calldata 参数策略校验", intent.intent_id)
+        try:
+            self.calldata_policy.validate(
+                target=intent.target, calldata=intent.calldata,
+                value=intent.value, now_ts=self.clock(),
+            )
+        except Exception as error:
+            self._record_existing_validation_failure(intent, error)
+            LOGGER.error("Intent %s calldata 参数策略拒绝：%s", intent.intent_id, error)
+            raise
+        LOGGER.info("Intent %s calldata 参数策略校验通过", intent.intent_id)
+
+    def _record_existing_validation_failure(
+        self, intent: Intent, error: Exception
+    ) -> None:
+        """已有可信记录校验失败时按状态表落为 FAILED。"""
+        try:
+            current = self.store.load(intent.intent_id)
+        except IntentStoreError:
+            return
+        stored_identity = (
+            current.intent_id, current.target, current.calldata,
+            current.value, current.created_at,
+        )
+        incoming_identity = (
+            intent.intent_id, intent.target, intent.calldata,
+            intent.value, intent.created_at,
+        )
+        if stored_identity != incoming_identity:
+            return
+        if current.status in TERMINAL_STATUSES:
+            return
+        reason = str(error) or error.__class__.__name__
+        self.store.save(
+            replace(current, status=IntentStatus.FAILED, error=reason)
+        )
+
+    def _rpc_transaction(self, intent: Intent) -> dict[str, Any]:
+        return {
+            "from": self.signer.address, "to": intent.target,
+            "data": intent.calldata, "value": hex(intent.value),
+        }
+
+    def _simulate(
+        self, intent: Intent, current: Intent, *, persist_success: bool
+    ) -> Intent:
+        rpc_transaction = self._rpc_transaction(intent)
+        LOGGER.info("Intent %s 开始 eth_call 模拟", intent.intent_id)
+        try:
+            self.rpc.call("eth_call", [rpc_transaction, "pending"])
+        except Exception as error:
+            reason = str(error) or error.__class__.__name__
+            self.store.save(
+                replace(current, status=IntentStatus.FAILED, error=f"模拟回滚：{reason}")
+            )
+            LOGGER.error("Intent %s 模拟回滚，中止执行：%s", intent.intent_id, reason)
+            raise ExecutionError(f"交易模拟回滚：{reason}") from None
+        if persist_success:
+            current = self.store.save(replace(current, status=IntentStatus.SIMULATED))
+        LOGGER.info("Intent %s eth_call 模拟通过", intent.intent_id)
+        return current
+
     def _finish_signed(
         self, intent: Intent, allow_broadcast: bool, raw: bytes | None = None
     ) -> ExecutionResult:
         broadcast = require_broadcast_flag(allow_broadcast)
-        transaction = intent.transaction or {}
+        transaction = self._assert_transaction_matches_intent(intent)
         if raw is None:
             raw = self.signer.sign_transaction(transaction)
         expected_hash = "0x" + keccak(raw).hex()
@@ -167,6 +250,49 @@ class TransactionExecutor:
         )
         LOGGER.info("Intent %s 已发送，等待确认：%s", intent.intent_id, returned_hash)
         return self._wait_for_receipt(sent)
+
+    def _resume_signed(
+        self, intent: Intent, allow_broadcast: bool
+    ) -> ExecutionResult:
+        """对 SIGNED 记录重新授权、核对并模拟后再进入签名边界。"""
+        LOGGER.info("Intent %s 从已签名状态恢复，重新执行全部安全校验", intent.intent_id)
+        self._validate_intent(intent)
+        self._assert_transaction_matches_intent(intent)
+        self._simulate(intent, intent, persist_success=False)
+        return self._finish_signed(intent, allow_broadcast)
+
+    def _assert_transaction_matches_intent(self, intent: Intent) -> dict[str, Any]:
+        """拒绝任何与已授权 Intent 不完全一致的持久化交易。"""
+        transaction = intent.transaction
+        matches = type(transaction) is dict
+        if matches:
+            try:
+                matches = (
+                    type(transaction["chainId"]) is int
+                    and transaction["chainId"] == self.chain_id
+                    and to_checksum_address(transaction["to"])
+                    == to_checksum_address(intent.target)
+                    and transaction["data"] == intent.calldata
+                    and type(transaction["value"]) is int
+                    and transaction["value"] == intent.value
+                    and type(transaction["type"]) is int
+                    and transaction["type"] == 2
+                )
+                for name in (
+                    "nonce", "gas", "maxFeePerGas", "maxPriorityFeePerGas"
+                ):
+                    value = transaction[name]
+                    matches = matches and type(value) is int and value >= 0
+            except (KeyError, TypeError, ValueError):
+                matches = False
+        if not matches:
+            message = "持久化交易与 Intent 不一致，已中止"
+            self.store.save(
+                replace(intent, status=IntentStatus.FAILED, error=message)
+            )
+            LOGGER.error("Intent %s %s", intent.intent_id, message)
+            raise ExecutionError(message)
+        return transaction
 
     def _resume_sent(self, intent: Intent) -> ExecutionResult:
         LOGGER.info("Intent %s 从已发送状态恢复确认", intent.intent_id)

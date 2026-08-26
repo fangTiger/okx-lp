@@ -119,14 +119,17 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
         run_mode = load_run_mode()
-        report, _gate = run_startup(args.config, args.facts)
+        report, gate = run_startup(args.config, args.facts)
     except Exception as error:
         LOGGER.error("启动校验未通过：%s", error)
         return 2
-    mode = (
-        "dry_run（禁止广播）"
-        if run_mode is RunMode.DRY_RUN else "live（可请求实盘）"
-    )
+    effective_live = run_mode is RunMode.LIVE and not gate.forced_dry_run
+    if effective_live:
+        mode = "live（可请求实盘）"
+    elif run_mode is RunMode.LIVE:
+        mode = "dry_run（事实闸门强制：存在 live 级未核实事实）"
+    else:
+        mode = "dry_run（禁止广播）"
     LOGGER.info("链上校验通过：池=%s，区块=%s，模式=%s", ",".join(report.verified_pool_ids), report.block, mode)
     return 0
 

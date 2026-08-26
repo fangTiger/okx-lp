@@ -14,6 +14,7 @@ from eth_utils import to_checksum_address
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from okxlp.chain.gas import GasEstimator, load_gas_policy
+from okxlp.chain.calldata_policy import CalldataPolicy
 from okxlp.chain.nonce import NonceManager
 from okxlp.chain.signer import KeystoreSigner
 from okxlp.chain.whitelist import TransactionWhitelist
@@ -79,8 +80,13 @@ class M5MintDryRunTest(unittest.TestCase):
                     nonce_manager=NonceManager(rpc, signer.address),
                     gas_estimator=GasEstimator(rpc, load_gas_policy()),
                     whitelist=TransactionWhitelist.from_config(),
+                    calldata_policy=CalldataPolicy.from_config(
+                        Path("config/execution.yaml"), Path("config/pools.yaml"),
+                        executor_address=signer.address, allowed_token_ids=set(),
+                    ),
                     store=IntentStore(root / "intents"), chain_id=196,
                     printer=output.append,
+                    clock=lambda: 1_999_999_400,
                 )
                 result = executor.execute(Intent.create(NPM, mint_calldata(signer.address)))
 

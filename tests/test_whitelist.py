@@ -78,9 +78,11 @@ class TransactionWhitelistTest(unittest.TestCase):
         )
         whitelist = TransactionWhitelist.from_config(Path("config/execution.yaml"))
         for selector in (
-            "0x88316456", "0x219f5d17", "0x0c49ccbe", "0xfc6f7865", "0x42966c68"
+            "0x88316456", "0x0c49ccbe", "0xfc6f7865", "0x42966c68"
         ):
             self.assertEqual(whitelist.validate(NPM, selector), selector)
+        with self.assertRaises(WhitelistError):
+            whitelist.validate(NPM, "0x219f5d17")
         self.assertEqual(whitelist.validate(ROUTER, "0x04e45aaf"), "0x04e45aaf")
 
 
