@@ -14,7 +14,7 @@ class MachineStages:
     def _enter_stage(self, sample: Any, now: datetime, allow_broadcast: bool) -> str:
         try:
             self.actions.enter(sample, self.band, allow_broadcast=allow_broadcast)
-            reason = "建仓完成：已用 USDC 买入一半标的并 mint ±0.5% 区间"
+            reason = "建仓完成：已按实际两腿余额补足 50/50 并 mint ±0.5% 区间"
             return self._transition(MachineState.IN_RANGE, reason, sample, self.band, now)
         except Exception as error:
             self._lock_stage(now, error)

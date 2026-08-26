@@ -28,6 +28,10 @@ SAMPLE = MarketSample(
     Decimal("2000"), -201_526,
     price_to_sqrt_price_x96(Decimal("2000"), 18, 6),
 )
+FAILURE_SAMPLE = MarketSample(
+    Decimal("1738"), -202_925,
+    price_to_sqrt_price_x96(Decimal("1738"), 18, 6),
+)
 BAND = PriceBand(-201_591, -201_463, Decimal("1990"), Decimal("2010"))
 POOL = SimpleNamespace(
     token0=SimpleNamespace(address=TOKEN0, symbol="wASMLx", decimals=18),
@@ -224,6 +228,110 @@ def expected_minimum(value):
 
 
 class ProductionEnterTest(unittest.TestCase):
+    @staticmethod
+    def _asset_raw(amount):
+        return int(Decimal(str(amount)) * Decimal(10**18))
+
+    @staticmethod
+    def _usdc_raw(amount):
+        return int(Decimal(str(amount)) * Decimal(10**6))
+
+    def test_fresh_enter_swaps_25_usdc_to_asset(self):
+        reader = SequenceReader(snapshot(balance0=0, balance1=self._usdc_raw("199.69")))
+        actions, dependencies = make_actions(reader=reader, fact_limit=50)
+
+        actions.enter(FAILURE_SAMPLE, BAND)
+
+        call = dependencies.swap_router.calls[0]
+        self.assertEqual(len(dependencies.swap_router.calls), 1)
+        self.assertEqual((call["token_in"], call["token_out"]), (TOKEN1, TOKEN0))
+        self.assertEqual(call["amount_in"], self._usdc_raw("25"))
+        self.assertEqual(call["amount_usd"], Decimal("25"))
+
+    def test_fault_reentry_skips_swap_and_mints_existing_balances(self):
+        asset_raw = self._asset_raw("0.01436427")
+        reader = SequenceReader(
+            snapshot(balance0=asset_raw, balance1=self._usdc_raw("174.69"))
+        )
+        actions, dependencies = make_actions(reader=reader, fact_limit=50)
+
+        actions.enter(FAILURE_SAMPLE, BAND)
+
+        self.assertEqual(dependencies.swap_router.calls, [])
+        mint = decode_mint(dependencies.executor.intents[-1])
+        expected_usdc = int(
+            (
+                (Decimal("50") - Decimal("0.01436427") * FAILURE_SAMPLE.price)
+                * Decimal(10**6)
+            ).to_integral_value(rounding=ROUND_FLOOR)
+        )
+        self.assertEqual(mint[5:7], (asset_raw, expected_usdc))
+
+    def test_asset_heavy_enter_sells_asset_for_usdc(self):
+        reader = SequenceReader(
+            snapshot(
+                balance0=self._asset_raw("0.03"),
+                balance1=self._usdc_raw("174.69"),
+            )
+        )
+        actions, dependencies = make_actions(reader=reader, fact_limit=50)
+
+        actions.enter(FAILURE_SAMPLE, BAND)
+
+        call = dependencies.swap_router.calls[0]
+        expected_raw = int(
+            (Decimal("25") / FAILURE_SAMPLE.price * Decimal(10**18))
+            .to_integral_value(rounding=ROUND_FLOOR)
+        )
+        self.assertEqual((call["token_in"], call["token_out"]), (TOKEN0, TOKEN1))
+        self.assertEqual(call["amount_in"], expected_raw)
+        self.assertEqual(
+            call["amount_usd"],
+            Decimal(expected_raw) / Decimal(10**18) * FAILURE_SAMPLE.price,
+        )
+
+    def test_asset_slightly_heavy_within_dust_skips_swap(self):
+        asset_raw = int(
+            (Decimal("25.5") / FAILURE_SAMPLE.price * Decimal(10**18))
+            .to_integral_value(rounding=ROUND_FLOOR)
+        )
+        reader = SequenceReader(
+            snapshot(balance0=asset_raw, balance1=self._usdc_raw("174.69"))
+        )
+        actions, dependencies = make_actions(reader=reader, fact_limit=50)
+
+        actions.enter(FAILURE_SAMPLE, BAND)
+
+        self.assertEqual(dependencies.swap_router.calls, [])
+
+    def test_insufficient_usdc_narrows_capital_and_swaps_half(self):
+        reader = SequenceReader(snapshot(balance0=0, balance1=self._usdc_raw("10")))
+        actions, dependencies = make_actions(reader=reader, fact_limit=50)
+
+        actions.enter(FAILURE_SAMPLE, BAND)
+
+        call = dependencies.swap_router.calls[0]
+        self.assertEqual((call["token_in"], call["token_out"]), (TOKEN1, TOKEN0))
+        self.assertEqual(call["amount_in"], self._usdc_raw("5"))
+        self.assertEqual(call["amount_usd"], Decimal("5"))
+
+    def test_live_mint_uses_post_swap_actual_balances_capped_by_capital(self):
+        after_swap_asset = self._asset_raw("0.014")
+        after_swap_usdc = self._usdc_raw("25.5")
+        reader = SequenceReader(
+            snapshot(balance0=0, balance1=self._usdc_raw("199.69")),
+            snapshot(balance0=after_swap_asset, balance1=after_swap_usdc),
+        )
+        actions, dependencies = make_actions(reader=reader, fact_limit=50)
+
+        actions.enter(FAILURE_SAMPLE, BAND, allow_broadcast=True)
+
+        mint = decode_mint(dependencies.executor.intents[-1])
+        self.assertEqual(mint[5:7], (after_swap_asset, after_swap_usdc))
+        self.assertEqual(len(reader.calls), 2)
+        self.assertGreater(mint[7], 0)
+        self.assertGreater(mint[8], 0)
+
     def test_zero_available_capital_fails_before_constructing_any_intent(self):
         approval = FakeApprovalManager()
         position = CountingPositionManager()

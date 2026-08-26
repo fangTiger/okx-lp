@@ -275,6 +275,11 @@ def main(argv: list[str] | None = None) -> None:
     )
     try:
         if args.action == "enter":
+            print(
+                "提示: dry-run mint 数量为 swap 报价估算；"
+                "生产广播会在 swap 后重新读取真实余额。",
+                flush=True,
+            )
             actions.enter(sample, band, allow_broadcast=False)
         else:
             actions.exit(sample, allow_broadcast=False)

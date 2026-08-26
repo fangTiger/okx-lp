@@ -1,6 +1,6 @@
 # 正式风控参数。当前仍保持 dry-run，后续里程碑再接入执行闸门。
 
-mode: dry_run
+mode: live
 
 outrange:
   confirm_seconds: 180        # 持续界外确认时间

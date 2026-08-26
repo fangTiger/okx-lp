@@ -90,6 +90,11 @@ class PreviewActionsToolTest(unittest.TestCase):
         self.assertNotIn("send_raw_transaction", source)
         self.assertNotIn("RemoteSigner", source)
 
+    def test_enter_preview_marks_mint_balances_as_estimated(self):
+        source = TOOL_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("dry-run mint 数量为 swap 报价估算", source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -96,6 +96,12 @@ class MainStateMachine(MachineLoop, MachineStages):
             reason = f"做市条件满足：{session_reason}；{risk.reason}"
             return self._transition(MachineState.ENTERING, reason, sample, band, now)
         if self.state is MachineState.ENTERING:
+            refreshed = MachineSnapshot(
+                MachineState.ENTERING,
+                self._target_band(sample.price),
+            )
+            self.state_store.save(refreshed)
+            self.snapshot = refreshed
             return self._enter_stage(sample, now, allow_broadcast)
         if self.state is MachineState.IN_RANGE:
             return self._in_range(sample, now)

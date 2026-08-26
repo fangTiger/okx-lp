@@ -83,7 +83,7 @@ class MachineActions(Protocol):
     def enter(
         self, sample: MarketSample, band: PriceBand, *, allow_broadcast: bool = False,
     ) -> None:
-        """先用一半 USDC 买标的，再 mint 指定区间。"""
+        """按链上实际两腿余额补足 50/50，再 mint 指定区间。"""
 
     def rebalance_actions(self, sample: MarketSample, band: PriceBand) -> Any:
         """构造交给 M6 的 burn、collect、swap、mint 动作。"""

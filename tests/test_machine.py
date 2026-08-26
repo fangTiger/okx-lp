@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from okxlp.strategy.machine import MainStateMachine, MarketSample, RiskDecision
 from okxlp.strategy.machine_journal import TransitionJournal
 from okxlp.strategy.machine_state import MachineState, MachineStateStore
+from okxlp.strategy.machine_types import build_price_band
 from okxlp.strategy.outrange import OutrangeDetector
 from okxlp.uniswap.tickmath import price_to_tick
 
@@ -65,9 +66,11 @@ class FakeMarket:
 class FakeActions:
     def __init__(self, calls):
         self.calls = calls
+        self.enter_bands = []
 
     def enter(self, _sample, _band, *, allow_broadcast=False):
         self.calls.append(f"enter:{allow_broadcast}")
+        self.enter_bands.append(_band)
 
     def rebalance_actions(self, _sample, _band):
         self.calls.append("build_rebalance")
@@ -151,6 +154,38 @@ class MachineLifecycleTest(unittest.TestCase):
         self.assertEqual(
             (self.machine.band.tick_lower, self.machine.band.tick_upper),
             (-50, 60),
+        )
+
+    def test_entering_rebuilds_and_persists_band_from_current_price(self):
+        self.market.set("100")
+        self.step()
+        stale_band = self.machine.band
+        self.market.set("120")
+
+        result = self.step(5)
+
+        expected = build_price_band(Decimal("120"), 10, 18, 18)
+        self.assertNotEqual(stale_band, expected)
+        self.assertEqual(self.machine.actions.enter_bands[-1], expected)
+        self.assertLessEqual(expected.price_lower, Decimal("120"))
+        self.assertLess(Decimal("120"), expected.price_upper)
+        self.assertEqual(result.state, MachineState.IN_RANGE)
+        self.assertEqual(self.machine.band, expected)
+
+    def test_in_range_keeps_minted_band_when_current_price_moves(self):
+        self.market.set("100")
+        self.step()
+        self.step(5)
+        minted_band = self.machine.band
+        self.market.set("120")
+
+        result = self.step(5)
+
+        self.assertEqual(result.state, MachineState.OUT_PENDING)
+        self.assertEqual(self.machine.band, minted_band)
+        self.assertNotEqual(
+            self.machine.band,
+            build_price_band(Decimal("120"), 10, 18, 18),
         )
 
 

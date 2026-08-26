@@ -14,7 +14,9 @@ import yaml
 from okxlp.config_validation import address as validate_address
 from okxlp.exec.authorization import require_broadcast_flag
 from okxlp.exec.intent import Intent, IntentStatus
-from okxlp.strategy.allocation import BalanceSnapshot
+from okxlp.strategy.allocation import (
+    BalanceSnapshot, calculate_50_50_swap, load_min_swap_usd,
+)
 from okxlp.strategy.rebalance import RebalanceActions
 from okxlp.uniswap.tickmath import position_amounts
 
@@ -93,6 +95,8 @@ class ProductionActions:
         return usdc_amount, asset_amount
 
     def _minimum(self, desired: int) -> int:
+        if desired == 0:
+            return 0
         minimum = int(
             (
                 Decimal(desired)
@@ -103,6 +107,41 @@ class ProductionActions:
         if minimum <= 0:
             raise ActionError("mint 最低数量为 0，拒绝无保护建仓")
         return minimum
+
+    def _available_usd(self, portfolio, price: Decimal) -> Decimal:
+        asset_raw = self._balance_raw(portfolio, self.asset)
+        usdc_raw = self._balance_raw(portfolio, self.usdc)
+        asset = Decimal(asset_raw) / (Decimal(10) ** self.asset.decimals)
+        usdc = Decimal(usdc_raw) / (Decimal(10) ** self.usdc.decimals)
+        return asset * price + usdc
+
+    def _deployment_amounts(
+        self, portfolio, capital_usd: Decimal, price: Decimal,
+    ) -> tuple[int, int]:
+        """按标的优先规则从钱包余额截取本轮实际投入数量。"""
+        asset_balance = self._balance_raw(portfolio, self.asset)
+        asset_usd = (
+            Decimal(asset_balance)
+            / (Decimal(10) ** self.asset.decimals)
+            * price
+        )
+        deploy_asset_usd = min(asset_usd, capital_usd)
+        if deploy_asset_usd == asset_usd:
+            deploy_asset = asset_balance
+        else:
+            deploy_asset = int(
+                (
+                    deploy_asset_usd / price
+                    * (Decimal(10) ** self.asset.decimals)
+                ).to_integral_value(rounding=ROUND_FLOOR)
+            )
+        deploy_usdc = int(
+            (
+                (capital_usd - deploy_asset_usd)
+                * (Decimal(10) ** self.usdc.decimals)
+            ).to_integral_value(rounding=ROUND_FLOOR)
+        )
+        return deploy_asset, deploy_usdc
 
     def _decrease_minimums(self, position, sample) -> tuple[int, int]:
         """按决策轮同区块池价计算 decreaseLiquidity 两腿下限。"""
@@ -163,53 +202,103 @@ class ProductionActions:
     def enter(
         self, sample, band, *, allow_broadcast: bool = False
     ) -> None:
-        """补足四组授权，再以 USDC 本金的一半买入并 mint。"""
+        """按链上实际两腿余额补足 50/50 后 mint。"""
         broadcast = require_broadcast_flag(allow_broadcast)
         portfolio = self.reader.read(self.owner, spenders=self._spenders)
         total_capital_usd, probe_capital_usd = _capital_limits()
-        usdc_balance_usd = Decimal(
-            self._balance_raw(portfolio, self.usdc)
-        ) / (Decimal(10) ** self.usdc.decimals)
         allowed = self.fact_gate.max_position_usd(
             total_capital_usd, probe_capital_usd
         )
-        capital_usd = min(usdc_balance_usd, allowed)
+        capital_usd = min(
+            self._available_usd(portfolio, sample.price), allowed
+        )
         if capital_usd <= 0:
             raise ActionError(
                 "可用本金为 0，请先在 config/risk.yaml 设置 "
                 "limits.total_capital_usd"
             )
-        capital_raw = int(
-            (capital_usd * (Decimal(10) ** self.usdc.decimals))
-            .to_integral_value(rounding=ROUND_FLOOR)
-        )
-        swap_amount = capital_raw // 2
-        remaining_usdc = capital_raw - swap_amount
-        if swap_amount <= 0 or remaining_usdc <= 0:
-            raise ActionError("可用本金过小，无法按 50/50 构造受保护建仓")
 
         try:
-            swaps = self.swap_router.plan_exact_input_single(
-                token_in=self.usdc.address,
-                token_out=self.asset.address,
-                fee=self.fee,
-                recipient=self.owner,
-                amount_in=swap_amount,
-                amount_usd=Decimal(swap_amount)
-                / (Decimal(10) ** self.usdc.decimals),
-                slippage_bps=self.swap_policy.max_slippage_bps,
+            asset_amount, usdc_amount = self._deployment_amounts(
+                portfolio, capital_usd, sample.price
             )
-            asset_amount = sum(item.quote.amount_out for item in swaps)
-            amount0_desired, amount1_desired = self._ordered_amounts(
-                asset_amount, remaining_usdc
+            requirement = calculate_50_50_swap(
+                BalanceSnapshot(
+                    token0=self.asset.address,
+                    token1=self.usdc.address,
+                    amount0_raw=asset_amount,
+                    amount1_raw=usdc_amount,
+                    token0_decimals=self.asset.decimals,
+                    token1_decimals=self.usdc.decimals,
+                    price_token1_per_token0=sample.price,
+                ),
+                load_min_swap_usd(RISK_PATH),
             )
+            if requirement is None:
+                swaps = ()
+            else:
+                swaps = self.swap_router.plan_exact_input_single(
+                    token_in=requirement.token_in,
+                    token_out=requirement.token_out,
+                    fee=self.fee,
+                    recipient=self.owner,
+                    amount_in=requirement.amount_in,
+                    amount_usd=requirement.amount_usd,
+                    slippage_bps=self.swap_policy.max_slippage_bps,
+                )
+            estimated_asset, estimated_usdc = asset_amount, usdc_amount
+            if requirement is not None:
+                received = sum(item.quote.amount_out for item in swaps)
+                if requirement.token_in == self.asset.address:
+                    estimated_asset -= requirement.amount_in
+                    estimated_usdc += received
+                else:
+                    estimated_usdc -= requirement.amount_in
+                    estimated_asset += received
             requirements = (
-                (self.usdc.address, self.swap_router.router_address, swap_amount),
-                (self.asset.address, self.swap_router.router_address, asset_amount),
-                (self.usdc.address, self.position_manager.address, remaining_usdc),
-                (self.asset.address, self.position_manager.address, asset_amount),
+                (
+                    self.usdc.address, self.swap_router.router_address,
+                    0 if requirement is None or requirement.token_in != self.usdc.address
+                    else requirement.amount_in,
+                ),
+                (
+                    self.asset.address, self.swap_router.router_address,
+                    0 if requirement is None or requirement.token_in != self.asset.address
+                    else requirement.amount_in,
+                ),
+                (self.usdc.address, self.position_manager.address, estimated_usdc),
+                (self.asset.address, self.position_manager.address, estimated_asset),
             )
             approvals = self.approval_manager.plan(self.owner, requirements)
+        except ActionError:
+            raise
+        except Exception as error:
+            reason = str(error) or error.__class__.__name__
+            raise ActionError(f"enter Intent 构造失败：{reason}") from error
+
+        for plan in approvals:
+            self._execute(plan.intent, "approve", broadcast)
+        for scheduled in swaps:
+            if scheduled.delay_seconds:
+                time.sleep(scheduled.delay_seconds)
+            self._execute(scheduled.intent, "swap", broadcast)
+
+        try:
+            if broadcast:
+                current = self.reader.read(self.owner, spenders=self._spenders)
+                mint_capital = min(
+                    capital_usd,
+                    self._available_usd(current, sample.price),
+                )
+                asset_desired, usdc_desired = self._deployment_amounts(
+                    current, mint_capital, sample.price
+                )
+            else:
+                asset_desired, usdc_desired = estimated_asset, estimated_usdc
+                LOGGER.info("dry-run mint desired 使用 swap 报价估算余额")
+            amount0_desired, amount1_desired = self._ordered_amounts(
+                asset_desired, usdc_desired
+            )
             mint = self.position_manager.mint(
                 token0=self.token0.address,
                 token1=self.token1.address,
@@ -227,14 +316,7 @@ class ProductionActions:
             raise
         except Exception as error:
             reason = str(error) or error.__class__.__name__
-            raise ActionError(f"enter Intent 构造失败：{reason}") from error
-
-        for plan in approvals:
-            self._execute(plan.intent, "approve", broadcast)
-        for scheduled in swaps:
-            if scheduled.delay_seconds:
-                time.sleep(scheduled.delay_seconds)
-            self._execute(scheduled.intent, "swap", broadcast)
+            raise ActionError(f"enter mint Intent 构造失败：{reason}") from error
         self._execute(mint, "mint", broadcast)
 
     def rebalance_actions(self, sample, band) -> RebalanceActions:
