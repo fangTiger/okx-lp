@@ -15,12 +15,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from okxlp.campaign.gate import load_fact_gate
 from okxlp.chain.rpc import JsonRpcClient
 from okxlp.config import load_config
+from okxlp.exec.intent import Intent
 from okxlp.market.sessions import MarketSessions
 from okxlp.strategy.machine import MainStateMachine, MarketSample, RiskDecision
 from okxlp.strategy.machine_journal import TransitionJournal
 from okxlp.strategy.machine_state import MachineStateStore
 from okxlp.strategy.outrange import OutrangeDetector
+from okxlp.strategy.rebalance import BalanceSnapshot, RebalanceActions
 from okxlp.uniswap.pool import UniswapV3Pool
+
+
+NPM = "0x315e413a11ab0df498ef83873012430ca36638ae"
+TOKEN0 = "0x9147b03c16b18fc4f686f610f189f91ddf4347b4"
+TOKEN1 = "0xb6ceceab302e2e4948951ee7843fc24e92933061"
 
 
 class FixedMarket:
@@ -63,9 +70,20 @@ class NoBroadcastActions:
         _reject_broadcast(allow_broadcast)
         print(f"动作预览：买入一半标的后 mint [{band.tick_lower}, {band.tick_upper}]")
 
-    def rebalance_actions(self, _sample, _band):
-        """返回只读验收标记。"""
-        return "dry-run-rebalance"
+    def rebalance_actions(self, sample, _band):
+        """返回签名与拆单回调均符合生产接口的预览动作。"""
+        preview = lambda selector, intent_id: Intent.create(
+            NPM, selector, intent_id=intent_id
+        )
+        return RebalanceActions(
+            burn=lambda intent_id: preview("0x0c49ccbe", intent_id),
+            collect=lambda intent_id: preview("0xfc6f7865", intent_id),
+            read_balances=lambda: BalanceSnapshot(
+                TOKEN0, TOKEN1, 0, 0, 18, 6, str(sample.price)
+            ),
+            build_swap=lambda _requirement, _intent_ids: (),
+            mint=lambda intent_id: preview("0x88316456", intent_id),
+        )
 
     def exit(self, _sample, *, allow_broadcast=False) -> None:
         """打印撤出意图并拒绝广播授权。"""

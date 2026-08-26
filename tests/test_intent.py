@@ -4,11 +4,18 @@ import sys
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from okxlp.exec.intent import Intent, IntentStatus, IntentStore, IntentStoreError
+from okxlp.exec.intent import (
+    Intent,
+    IntentIntegrityError,
+    IntentStatus,
+    IntentStore,
+    IntentStoreError,
+)
 
 
 TARGET = "0x" + "12" * 20
@@ -71,6 +78,33 @@ class IntentStoreTest(unittest.TestCase):
         with self.assertRaisesRegex(IntentStoreError, "内容冲突"):
             store.persist(replace(intent, target="0x" + "34" * 20))
 
+    def test_same_deterministic_id_ignores_recreated_timestamp(self):
+        store = IntentStore(self.root)
+        intent = Intent.create(
+            TARGET, "0x88316456", intent_id="ab" * 16
+        )
+        persisted = store.persist(intent)
+        recreated = replace(
+            intent, created_at=intent.created_at + timedelta(seconds=30)
+        )
+
+        self.assertEqual(store.persist(recreated), persisted)
+
+    def test_explicit_intent_id_is_validated(self):
+        intent_id = "ab" * 16
+
+        intent = Intent.create(
+            TARGET, "0x88316456", intent_id=intent_id
+        )
+
+        self.assertEqual(intent.intent_id, intent_id)
+        for invalid in ("AB" * 16, "a" * 31, "g" * 32, ""):
+            with self.subTest(intent_id=invalid):
+                with self.assertRaisesRegex(ValueError, "Intent ID"):
+                    Intent.create(
+                        TARGET, "0x88316456", intent_id=invalid
+                    )
+
     def test_restart_loads_pending_and_reconciles_receipts(self):
         store = IntentStore(self.root)
         successful = store.persist(Intent.create(TARGET, "0x88316456"))
@@ -102,6 +136,9 @@ class IntentStoreTest(unittest.TestCase):
 
         with self.assertRaisesRegex(IntentStoreError, "落盘内容完整性校验失败"):
             IntentStore(self.root).load(intent.intent_id)
+
+    def test_integrity_error_keeps_intent_store_error_compatibility(self):
+        self.assertTrue(issubclass(IntentIntegrityError, IntentStoreError))
 
     def test_illegal_status_transitions_are_rejected(self):
         store = IntentStore(self.root)

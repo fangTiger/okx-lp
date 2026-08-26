@@ -50,6 +50,7 @@ class PositionManager:
         width: Decimal, tick_spacing: int, amount0_desired: int,
         amount1_desired: int, amount0_min: int, amount1_min: int,
         recipient: str, deadline: int, value: int = 0,
+        intent_id: str | None = None,
     ) -> Intent:
         """按 M1 向外对齐 tick 后构造 mint Intent。"""
         tick_lower, tick_upper = aligned_tick_range(current_tick, width, tick_spacing)
@@ -58,25 +59,41 @@ class PositionManager:
             amount0_desired, amount1_desired, amount0_min, amount1_min,
             recipient, deadline,
         )
-        return Intent.create(self.address, _calldata(MINT, values), value=value)
+        return Intent.create(
+            self.address, _calldata(MINT, values), value=value,
+            intent_id=intent_id,
+        )
 
     def decrease_liquidity(
         self, *, token_id: int, liquidity: int, amount0_min: int,
         amount1_min: int, deadline: int, value: int = 0,
+        intent_id: str | None = None,
     ) -> Intent:
         """构造再平衡 burn 阶段使用的 decreaseLiquidity Intent。"""
         values = (token_id, liquidity, amount0_min, amount1_min, deadline)
-        return Intent.create(self.address, _calldata(DECREASE, values), value=value)
+        return Intent.create(
+            self.address, _calldata(DECREASE, values), value=value,
+            intent_id=intent_id,
+        )
 
     def collect(
         self, *, token_id: int, recipient: str,
         amount0_max: int = MAX_UINT128, amount1_max: int = MAX_UINT128,
-        value: int = 0,
+        value: int = 0, intent_id: str | None = None,
     ) -> Intent:
         """构造 collect Intent，默认领取两腿全部应计金额。"""
         values = (token_id, recipient, amount0_max, amount1_max)
-        return Intent.create(self.address, _calldata(COLLECT, values), value=value)
+        return Intent.create(
+            self.address, _calldata(COLLECT, values), value=value,
+            intent_id=intent_id,
+        )
 
-    def burn(self, token_id: int, *, value: int = 0) -> Intent:
+    def burn(
+        self, token_id: int, *, value: int = 0,
+        intent_id: str | None = None,
+    ) -> Intent:
         """构造销毁已清空头寸 NFT 的 burn Intent。"""
-        return Intent.create(self.address, _calldata(BURN, token_id), value=value)
+        return Intent.create(
+            self.address, _calldata(BURN, token_id), value=value,
+            intent_id=intent_id,
+        )

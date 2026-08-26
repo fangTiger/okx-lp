@@ -22,6 +22,10 @@ class IntentStoreError(RuntimeError):
     """表示 Intent 内容、落盘或恢复失败。"""
 
 
+class IntentIntegrityError(IntentStoreError):
+    """表示落盘 Intent 内容完整性校验失败，记录不可信。"""
+
+
 class IntentStatus(str, Enum):
     """Intent 从创建到终态的持久化状态。"""
 
@@ -88,11 +92,19 @@ class Intent:
     transaction: dict[str, Any] | None = None
 
     @classmethod
-    def create(cls, target: str, calldata: str, *, value: int = 0) -> "Intent":
-        """创建具有随机唯一 ID 与 UTC 时间的 Intent。"""
+    def create(
+        cls, target: str, calldata: str, *, value: int = 0,
+        intent_id: str | None = None,
+    ) -> "Intent":
+        """创建具有合法唯一 ID 与 UTC 时间的 Intent。"""
         if type(value) is not int or value < 0:
             raise ValueError("Intent value 必须是非负整数")
-        return cls(uuid4().hex, target, calldata, value, datetime.now(timezone.utc))
+        selected_id = uuid4().hex if intent_id is None else intent_id
+        if type(selected_id) is not str or ID_PATTERN.fullmatch(selected_id) is None:
+            raise ValueError("Intent ID 必须是 32 位小写十六进制字符")
+        return cls(
+            selected_id, target, calldata, value, datetime.now(timezone.utc)
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """转换为稳定 JSON 结构。"""
@@ -110,7 +122,7 @@ class Intent:
         payload = dict(data)
         actual_hash = payload.pop("content_hash", None)
         if actual_hash != _content_hash(payload):
-            raise IntentStoreError("Intent 落盘内容完整性校验失败")
+            raise IntentIntegrityError("Intent 落盘内容完整性校验失败")
         try:
             return cls(
                 intent_id=payload["intent_id"], target=payload["target"],
@@ -140,7 +152,7 @@ class IntentStore:
     def _identity(intent: Intent) -> tuple[Any, ...]:
         return (
             intent.intent_id, intent.target, intent.calldata,
-            intent.value, intent.created_at,
+            intent.value,
         )
 
     def persist(self, intent: Intent) -> Intent:
@@ -179,16 +191,28 @@ class IntentStore:
         self._write(intent)
         return intent
 
-    def _record_integrity_failure(self, intent: Intent) -> Intent:
-        """用已校验的内存 Intent 原子替换无法信任的损坏落盘记录。"""
-        if not self._path(intent.intent_id).exists():
+    def quarantine_corrupted(self, intent: Intent) -> Intent:
+        """原样隔离损坏记录，再落盘可供人工追溯的失败标记。"""
+        path = self._path(intent.intent_id)
+        if not path.exists():
             raise IntentStoreError("Intent 尚未首次落盘，拒绝记录完整性失败")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        quarantine = self.root / f"{intent.intent_id}.corrupt-{timestamp}.json"
+        if quarantine.exists():
+            raise IntentStoreError(f"Intent 隔离文件已存在：{quarantine.name}")
+        try:
+            os.replace(path, quarantine)
+        except OSError:
+            raise IntentStoreError(f"Intent 损坏记录隔离失败：{intent.intent_id}") from None
         failed = replace(
             intent,
             status=IntentStatus.FAILED,
             nonce=None,
             tx_hash=None,
-            error="Intent 落盘内容完整性校验失败",
+            error=(
+                "Intent 落盘内容完整性校验失败，"
+                f"原始记录已隔离至 {quarantine.name}"
+            ),
             transaction=None,
         )
         self._write(failed)
@@ -228,7 +252,11 @@ class IntentStore:
 
     def load_pending(self) -> tuple[Intent, ...]:
         """读取所有未进入终态的 Intent。"""
-        intents = (self.load(path.stem) for path in sorted(self.root.glob("*.json")))
+        paths = (
+            path for path in sorted(self.root.glob("*.json"))
+            if ID_PATTERN.fullmatch(path.stem) is not None
+        )
+        intents = (self.load(path.stem) for path in paths)
         return tuple(intent for intent in intents if intent.status not in TERMINAL_STATUSES)
 
     def reconcile_pending(self, rpc: RpcLike) -> tuple[Intent, ...]:

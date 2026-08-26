@@ -19,7 +19,13 @@ from okxlp.chain.rpc import JsonRpcClient, RpcError
 from okxlp.chain.whitelist import TransactionWhitelist, WhitelistError
 from okxlp.exec.authorization import RunMode
 from okxlp.exec.executor import ExecutionError, TransactionExecutor
-from okxlp.exec.intent import Intent, IntentStatus, IntentStore, IntentStoreError
+from okxlp.exec.intent import (
+    Intent,
+    IntentIntegrityError,
+    IntentStatus,
+    IntentStore,
+    IntentStoreError,
+)
 
 
 TARGET = "0x" + "12" * 20
@@ -577,6 +583,38 @@ class TransactionExecutorTest(unittest.TestCase):
             ).execute(intent, allow_broadcast=True)
 
         self.assertEqual(self.store.load(intent.intent_id).status, IntentStatus.FAILED)
+        self.assertEqual(self.signer.calls, 0)
+        self.assertEqual(self.rpc.broadcasts, [])
+
+    def test_corrupted_sent_record_is_quarantined_without_losing_raw_bytes(self):
+        intent = Intent.create(TARGET, "0x88316456")
+        signed = self._signed(intent)
+        self.store.save(
+            replace(
+                signed, status=IntentStatus.SENT,
+                tx_hash="0x" + "ab" * 32,
+            )
+        )
+        path = Path(self.directory.name) / f"{intent.intent_id}.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["transaction"]["value"] = 1
+        path.write_text(json.dumps(data), encoding="utf-8")
+        corrupted_bytes = path.read_bytes()
+
+        with self.assertRaises(IntentIntegrityError):
+            self._executor().execute(intent, allow_broadcast=True)
+
+        quarantined = list(
+            Path(self.directory.name).glob(
+                f"{intent.intent_id}.corrupt-*.json"
+            )
+        )
+        self.assertEqual(len(quarantined), 1)
+        self.assertEqual(quarantined[0].read_bytes(), corrupted_bytes)
+        marker = self.store.load(intent.intent_id)
+        self.assertEqual(marker.status, IntentStatus.FAILED)
+        self.assertIn(quarantined[0].name, marker.error)
+        self.assertEqual(self.store.load_pending(), ())
         self.assertEqual(self.signer.calls, 0)
         self.assertEqual(self.rpc.broadcasts, [])
 

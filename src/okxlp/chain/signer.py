@@ -1,4 +1,7 @@
-"""隔离 keystore 解密与交易签名，模块外永不暴露私钥。"""
+"""keystore 签名实现；仅供签名子进程内部使用。
+
+主进程必须使用 ``RemoteSigner``，不得直接构造本模块的签名器。
+"""
 
 from __future__ import annotations
 
@@ -47,7 +50,7 @@ def _load_keystore(path: Path, password_env: str) -> tuple[str, Callable[[Mappin
 
 
 class KeystoreSigner:
-    """仅公开签名地址与交易签名能力的 keystore 签名器。"""
+    """仅供签名子进程内部使用；主进程必须使用 ``RemoteSigner``。"""
 
     __slots__ = ("_address", "_signer")
 

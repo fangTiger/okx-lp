@@ -158,6 +158,23 @@ class SwapRouterTest(unittest.TestCase):
         self.assertEqual([item.delay_seconds for item in plan], [0, 20, 20])
         self.assertEqual(len(self.rpc.calls), 3)
 
+    def test_split_plan_uses_first_preallocated_intent_ids(self):
+        intent_ids = tuple(f"{index:032x}" for index in range(1, 6))
+
+        plan = self.router.plan_exact_input_single(
+            token_in=TOKEN_IN,
+            token_out=TOKEN_OUT,
+            fee=500,
+            recipient=RECIPIENT,
+            amount_in=500_000_002,
+            amount_usd=Decimal("500"),
+            intent_ids=intent_ids,
+        )
+
+        self.assertEqual(
+            tuple(item.intent.intent_id for item in plan), intent_ids[:3]
+        )
+
     def test_actual_risk_config_loads_swap_defaults(self):
         policy = SwapPolicy.from_config(Path("config/risk.yaml"))
 

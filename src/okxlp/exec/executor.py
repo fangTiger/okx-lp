@@ -14,7 +14,8 @@ from eth_utils import keccak, to_checksum_address
 from okxlp.chain.calldata_policy import CalldataPolicy
 from okxlp.exec.authorization import require_broadcast_flag
 from okxlp.exec.intent import (
-    Intent, IntentStatus, IntentStore, IntentStoreError, TERMINAL_STATUSES,
+    Intent, IntentIntegrityError, IntentStatus, IntentStore, IntentStoreError,
+    TERMINAL_STATUSES,
 )
 
 
@@ -79,10 +80,9 @@ class TransactionExecutor:
         self._validate_intent(intent)
         try:
             current = self.store.persist(intent)
-        except IntentStoreError as error:
-            if str(error) == "Intent 落盘内容完整性校验失败":
-                self.store._record_integrity_failure(intent)
-                LOGGER.error("Intent %s 落盘内容完整性校验失败", intent.intent_id)
+        except IntentIntegrityError:
+            self.store.quarantine_corrupted(intent)
+            LOGGER.error("Intent %s 落盘内容完整性校验失败", intent.intent_id)
             raise
         LOGGER.info("Intent %s 已落盘：%s", intent.intent_id, current.status.value)
         if current.status in TERMINAL_STATUSES:
@@ -176,11 +176,11 @@ class TransactionExecutor:
             return
         stored_identity = (
             current.intent_id, current.target, current.calldata,
-            current.value, current.created_at,
+            current.value,
         )
         incoming_identity = (
             intent.intent_id, intent.target, intent.calldata,
-            intent.value, intent.created_at,
+            intent.value,
         )
         if stored_identity != incoming_identity:
             return

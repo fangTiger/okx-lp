@@ -79,6 +79,28 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(intent.calldata[:10], "0x42966c68")
         self.assertEqual(token_id, 7)
 
+    def test_rebalance_builders_accept_preallocated_intent_ids(self):
+        ids = ("11" * 16, "22" * 16, "33" * 16)
+
+        decrease = self.manager.decrease_liquidity(
+            token_id=7, liquidity=123, amount0_min=9, amount1_min=18,
+            deadline=2_000_000_000, intent_id=ids[0],
+        )
+        collect = self.manager.collect(
+            token_id=7, recipient=RECIPIENT, intent_id=ids[1]
+        )
+        mint = self.manager.mint(
+            token0=TOKEN0, token1=TOKEN1, fee=500,
+            current_tick=-201526, width=Decimal("0.005"), tick_spacing=10,
+            amount0_desired=10**15, amount1_desired=1_000_000,
+            amount0_min=0, amount1_min=0, recipient=RECIPIENT,
+            deadline=2_000_000_000, intent_id=ids[2],
+        )
+
+        self.assertEqual(
+            (decrease.intent_id, collect.intent_id, mint.intent_id), ids
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

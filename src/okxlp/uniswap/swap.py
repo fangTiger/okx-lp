@@ -136,6 +136,7 @@ class SwapRouter:
         self, *, token_in: str, token_out: str, fee: int, recipient: str,
         amount_in: int, slippage_bps: Decimal | None = None,
         sqrt_price_limit_x96: int = 0, delay_seconds: int = 0,
+        intent_id: str | None = None,
     ) -> ScheduledSwap:
         """以交易前报价构造一笔 exactInputSingle Intent。"""
         quote = self.quote_exact_input_single(
@@ -147,7 +148,8 @@ class SwapRouter:
             quote.amount_out_minimum, sqrt_price_limit_x96,
         )
         intent = Intent.create(
-            self.router_address, _calldata(SWAP_SIGNATURE, SWAP_TYPE, params)
+            self.router_address, _calldata(SWAP_SIGNATURE, SWAP_TYPE, params),
+            intent_id=intent_id,
         )
         return ScheduledSwap(intent, quote, delay_seconds)
 
@@ -155,6 +157,7 @@ class SwapRouter:
         self, *, token_in: str, token_out: str, fee: int, recipient: str,
         amount_in: int, amount_usd: Decimal, slippage_bps: Decimal | None = None,
         sqrt_price_limit_x96: int = 0,
+        intent_ids: tuple[str, ...] | None = None,
     ) -> tuple[ScheduledSwap, ...]:
         """仅当单笔美元金额达到阈值时拆为 3 到 5 笔。"""
         usd = _decimal(amount_usd)
@@ -165,6 +168,10 @@ class SwapRouter:
         )
         if type(amount_in) is not int or amount_in < count:
             raise ValueError("amount_in 不足以按要求拆单")
+        if intent_ids is not None and len(intent_ids) < count:
+            raise ValueError(
+                f"预分配 Intent ID 数量 {len(intent_ids)} 少于拆单笔数 {count}"
+            )
         quotient, remainder = divmod(amount_in, count)
         parts = [quotient + (1 if index < remainder else 0) for index in range(count)]
         return tuple(
@@ -172,6 +179,7 @@ class SwapRouter:
                 token_in=token_in, token_out=token_out, fee=fee,
                 recipient=recipient, amount_in=part, slippage_bps=slippage_bps,
                 sqrt_price_limit_x96=sqrt_price_limit_x96,
+                intent_id=None if intent_ids is None else intent_ids[index],
                 delay_seconds=0 if index == 0 else self.random.randint(
                     self.policy.split_interval_seconds_min,
                     self.policy.split_interval_seconds_max,
