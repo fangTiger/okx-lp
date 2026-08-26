@@ -93,6 +93,24 @@ class ClearStageLockToolTest(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def write_rebalance(
+        self, rebalance_id, *, completed=(), failed_stage=None, error=None,
+    ):
+        journal_dir = self.state_dir / "rebalances"
+        journal_dir.mkdir(exist_ok=True)
+        path = journal_dir / f"{rebalance_id}.json"
+        payload = {
+            "rebalance_id": rebalance_id,
+            "completed": list(completed),
+            "intent_ids": [],
+            "failed_stage": failed_stage,
+            "error": error,
+        }
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8",
+        )
+        return path
+
     @staticmethod
     def context(reader):
         token0 = SimpleNamespace(address=TOKEN0, symbol="wASMLx", decimals=18)
@@ -211,7 +229,109 @@ class ClearStageLockToolTest(unittest.TestCase):
         self.assertIsNone(reset["out_direction"])
         self.assertIn("当前状态 EXITING → 复位为 IDLE", output)
 
-    def test_reset_rebalancing_is_rejected_and_preserves_exact_bytes(self):
+    def test_reset_rebalancing_mint_failed_without_position_to_idle(self):
+        self.write_state("REBALANCING")
+        progress_path = self.write_rebalance(
+            "real-scene",
+            completed=("burn", "collect", "swap"),
+            failed_stage="mint",
+            error="Price slippage check",
+        )
+
+        code, output, _reader = self.invoke(["--reset-state", "--yes"])
+
+        self.assertEqual(code, 0)
+        reset = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(reset["state"], "IDLE")
+        self.assertIsNone(reset["band"])
+        self.assertIn(str(progress_path), output)
+        self.assertIn("completed：burn, collect, swap", output)
+        self.assertIn("failed_stage：mint", output)
+        self.assertIn("error：Price slippage check", output)
+        self.assertIn("链上本池有效头寸：无", output)
+        self.assertIn("mint 未上链，资金在钱包", output)
+        self.assertIn("复位目标：IDLE", output)
+
+    def test_reset_rebalancing_completed_mint_uses_chain_ticks(self):
+        self.write_state("REBALANCING")
+        position = active_position()
+        self.write_rebalance(
+            "completed-mint",
+            completed=("burn", "collect", "swap", "mint"),
+        )
+
+        code, output, _reader = self.invoke(
+            [
+                "--reset-state", "--yes",
+                "--rebalance-id", "completed-mint",
+            ],
+            positions=(position,),
+        )
+
+        self.assertEqual(code, 0)
+        reset = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(reset["state"], "IN_RANGE")
+        self.assertEqual(
+            (reset["band"]["tick_lower"], reset["band"]["tick_upper"]),
+            (position.tick_lower, position.tick_upper),
+        )
+        self.assertNotEqual(
+            reset["band"]["tick_lower"], self.payload["band"]["tick_lower"],
+        )
+        self.assertIn("四阶段全完成", output)
+        self.assertIn("复位目标：IN_RANGE", output)
+
+    def test_reset_rebalancing_burn_failed_with_position_to_in_range(self):
+        self.write_state("REBALANCING")
+        position = active_position()
+        self.write_rebalance(
+            "burn-failed", failed_stage="burn", error="burn reverted",
+        )
+
+        code, output, _reader = self.invoke(
+            ["--reset-state", "--yes"], positions=(position,),
+        )
+
+        self.assertEqual(code, 0)
+        reset = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(reset["state"], "IN_RANGE")
+        self.assertEqual(reset["band"]["tick_lower"], position.tick_lower)
+        self.assertEqual(reset["band"]["tick_upper"], position.tick_upper)
+        self.assertIn("burn 未生效，头寸仍在", output)
+
+    def test_reset_rebalancing_burn_failed_without_position_to_idle(self):
+        self.write_state("REBALANCING")
+        self.write_rebalance(
+            "burn-failed", failed_stage="burn", error="burn reverted",
+        )
+
+        code, output, _reader = self.invoke(["--reset-state", "--yes"])
+
+        self.assertEqual(code, 0)
+        reset = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(reset["state"], "IDLE")
+        self.assertIsNone(reset["band"])
+        self.assertIn("尚未动到资金或仅部分", output)
+
+    def test_reset_rebalancing_swap_failed_is_rejected(self):
+        self.write_state("REBALANCING")
+        self.write_rebalance(
+            "swap-failed",
+            completed=("burn", "collect"),
+            failed_stage="swap",
+            error="第三笔 swap 超时",
+        )
+        before = self.state_path.read_bytes()
+
+        code, output, _reader = self.invoke(["--reset-state", "--yes"])
+
+        self.assertNotEqual(code, 0)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertIn("拆单", output)
+        self.assertIn("无法判断已经成交了几笔", output)
+        self.assertIn("人工核对链上交易", output)
+
+    def test_reset_rebalancing_missing_progress_is_rejected(self):
         self.write_state("REBALANCING")
         before = self.state_path.read_bytes()
 
@@ -219,8 +339,54 @@ class ClearStageLockToolTest(unittest.TestCase):
 
         self.assertNotEqual(code, 0)
         self.assertEqual(self.state_path.read_bytes(), before)
-        self.assertIn("REBALANCING 处于四阶段中途", output)
-        self.assertIn("log/rebalances/", output)
+        self.assertIn("未完成进度文件：[无]", output)
+
+    def test_reset_rebalancing_corrupt_progress_is_rejected(self):
+        self.write_state("REBALANCING")
+        journal_dir = self.state_dir / "rebalances"
+        journal_dir.mkdir()
+        (journal_dir / "broken.json").write_text("{", encoding="utf-8")
+        before = self.state_path.read_bytes()
+
+        code, output, _reader = self.invoke(["--reset-state", "--yes"])
+
+        self.assertNotEqual(code, 0)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertIn("broken.json", output)
+        self.assertIn("损坏", output)
+
+    def test_reset_rebalancing_multiple_progress_requires_explicit_id(self):
+        self.write_state("REBALANCING")
+        self.write_rebalance(
+            "first-round", failed_stage="burn", error="first failed",
+        )
+        self.write_rebalance(
+            "second-round",
+            completed=("burn", "collect", "swap"),
+            failed_stage="mint",
+            error="second failed",
+        )
+        before = self.state_path.read_bytes()
+
+        code, output, _reader = self.invoke(["--reset-state", "--yes"])
+
+        self.assertNotEqual(code, 0)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertIn("first-round.json", output)
+        self.assertIn("second-round.json", output)
+
+        code, output, _reader = self.invoke(
+            [
+                "--reset-state", "--yes",
+                "--rebalance-id", "second-round",
+            ],
+        )
+
+        self.assertEqual(code, 0)
+        reset = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(reset["state"], "IDLE")
+        self.assertIn("second-round.json", output)
+        self.assertNotIn("first-round.json", output)
 
 
 if __name__ == "__main__":

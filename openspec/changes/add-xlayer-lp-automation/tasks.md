@@ -147,3 +147,9 @@
 - [x] 19.2 为 `MarketSessions` 增加 `ignore_listings` 并由 `from_files` 透传
 - [x] 19.3 为生产入口增加 `--ignore-sessions`、醒目横幅与中文 warning 日志
 - [x] 19.4 完成全量单测、OpenSpec 校验与 config/log 红线自查
+
+## M20 REBALANCING 按再平衡日志判定复位（批次 15）
+- [x] 20.1 以 TDD 覆盖进度与链上有效头寸联合判定矩阵
+- [x] 20.2 为 `clear_stage_lock.py` 增加唯一未完成轮次定位与 `--rebalance-id`
+- [x] 20.3 保持 swap 失败与生产入口 REBALANCING 无人值守路径硬拒绝
+- [x] 20.4 完成全量单测、OpenSpec 校验与 config/log 红线自查

@@ -23,6 +23,7 @@ from okxlp.exec.reconcile import reconcile_on_startup
 from okxlp.strategy.machine_state import (
     MachineSnapshot, MachineState, MachineStateStore, PriceBand,
 )
+from okxlp.strategy.rebalance import RebalanceJournal, RebalanceProgress
 from okxlp.uniswap.pool import SELECTORS as POOL_SELECTORS
 from okxlp.uniswap.pool import _word, decode_int
 from okxlp.uniswap.portfolio import PortfolioReader
@@ -52,6 +53,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reset-state", action="store_true",
         help="按链上本池有效头寸复位可判定的过渡状态",
+    )
+    parser.add_argument(
+        "--rebalance-id",
+        help="显式指定 REBALANCING 使用的进度记录",
     )
     parser.add_argument("--yes", action="store_true", help="跳过交互确认")
     return parser
@@ -129,6 +134,105 @@ def _render_reconcile(result, context: ReadOnlyContext, price: Decimal) -> str:
     return "\n".join(lines)
 
 
+def _unfinished(progress: RebalanceProgress) -> bool:
+    """判断进度是否属于尚未完整结束的再平衡轮次。"""
+    return progress.failed_stage is not None or (
+        bool(progress.completed) and "mint" not in progress.completed
+    )
+
+
+def _select_rebalance_progress(
+    root: Path, rebalance_id: str | None,
+) -> tuple[Path, RebalanceProgress]:
+    """选择唯一未完成轮次，或按人工给出的 ID 精确选择。"""
+    if not root.is_dir():
+        if rebalance_id is not None:
+            raise RuntimeError(
+                f"未找到指定的再平衡进度：{rebalance_id}.json"
+            )
+        raise RuntimeError("未完成进度文件：[无]")
+
+    journal = RebalanceJournal(root)
+    if rebalance_id is not None:
+        progress = journal.load(rebalance_id)
+        if progress is None:
+            raise RuntimeError(
+                f"未找到指定的再平衡进度：{rebalance_id}.json"
+            )
+        return journal.path(rebalance_id), progress
+
+    candidates = []
+    for path in sorted(root.glob("*.json"), key=lambda item: item.name):
+        try:
+            progress = journal.load(path.stem)
+        except (RuntimeError, ValueError) as error:
+            raise RuntimeError(
+                f"进度文件 {path.name} 无法使用：{error}"
+            ) from error
+        if progress is None:
+            raise RuntimeError(f"进度文件读取期间消失：{path.name}")
+        if _unfinished(progress):
+            candidates.append((path, progress))
+
+    names = "、".join(path.name for path, _ in candidates) or "[无]"
+    if len(candidates) != 1:
+        raise RuntimeError(
+            f"未完成进度文件：{names}；无法唯一确定再平衡轮次，"
+            "可用 --rebalance-id 显式指定"
+        )
+    return candidates[0]
+
+
+def _render_rebalance_progress(
+    path: Path, progress: RebalanceProgress, active_position,
+) -> str:
+    """输出人工复位所依赖的日志事实与链上事实。"""
+    completed = ", ".join(progress.completed) or "[无]"
+    if active_position is None:
+        position = "无"
+    else:
+        position = (
+            f"有 tokenId={active_position.token_id} "
+            f"liquidity={active_position.liquidity} "
+            f"ticks=[{active_position.tick_lower}, {active_position.tick_upper}]"
+        )
+    return "\n".join((
+        f"使用的再平衡进度文件：{path}",
+        f"completed：{completed}",
+        f"failed_stage：{progress.failed_stage or '无'}",
+        f"error：{progress.error or '无'}",
+        f"链上本池有效头寸：{position}",
+    ))
+
+
+def _rebalancing_reset_target(
+    progress: RebalanceProgress, active_position,
+) -> tuple[MachineState, str]:
+    """联合进度日志与链上有效头寸判定人工复位目标。"""
+    if progress.failed_stage == "swap":
+        # swap 阶段可能拆成 3–5 笔，日志只记录整个阶段的成败，
+        # 无法判断已经成交了几笔，因此不能推断两腿余额比例，必须人工查链。
+        raise RuntimeError(
+            "swap 阶段存在 3–5 笔拆单，日志无法判断已经成交了几笔，"
+            "必须人工核对链上交易"
+        )
+    if "mint" in progress.completed:
+        if active_position is not None:
+            return MachineState.IN_RANGE, "四阶段全完成"
+        raise RuntimeError("进度显示四阶段全完成，但链上无有效头寸")
+    if progress.failed_stage == "mint" and "swap" in progress.completed:
+        if active_position is None:
+            return MachineState.IDLE, "mint 未上链，资金在钱包"
+        raise RuntimeError("mint 失败记录与链上仍有有效头寸相互矛盾")
+    if progress.failed_stage in {"burn", "collect"}:
+        if active_position is None:
+            return MachineState.IDLE, "尚未动到资金或仅部分"
+        if progress.failed_stage == "burn":
+            return MachineState.IN_RANGE, "burn 未生效，头寸仍在"
+        raise RuntimeError("collect 失败但链上仍有有效头寸，无法判定资金状态")
+    raise RuntimeError("进度不符合可安全复位的判定矩阵")
+
+
 def _atomic_clear(path: Path) -> None:
     """只把 failure 与 failed_at 改为 null 后原子替换。"""
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -158,8 +262,7 @@ def _reset_target(state: MachineState, active_position) -> MachineState:
     """按链上有效头寸推导可判定的过渡阶段目标。"""
     if state is MachineState.REBALANCING:
         raise RuntimeError(
-            "REBALANCING 处于四阶段中途，链上头寸有无不足以判定资金状态，"
-            "必须人工核对 log/rebalances/ 进度与链上交易后手工处理"
+            "REBALANCING 必须通过专用分支联合进度日志与链上事实判定"
         )
     if state is MachineState.ENTERING:
         return (
@@ -226,10 +329,24 @@ def main(
                 "！！！警告：状态与链上不一致：链上已有本池流动性头寸，"
                 "建议人工核对后再清除"
             )
-        target = (
-            _reset_target(state.state, result.active_position)
-            if args.reset_state else state.state
-        )
+        target = state.state
+        if args.reset_state and state.state is MachineState.REBALANCING:
+            progress_path, progress = _select_rebalance_progress(
+                state_dir / "rebalances", args.rebalance_id,
+            )
+            printer(_render_rebalance_progress(
+                progress_path, progress, result.active_position,
+            ))
+            try:
+                target, conclusion = _rebalancing_reset_target(
+                    progress, result.active_position,
+                )
+            except RuntimeError as error:
+                printer(f"判定结论：{error}；复位目标：拒绝")
+                raise
+            printer(f"判定结论：{conclusion}；复位目标：{target.value}")
+        elif args.reset_state:
+            target = _reset_target(state.state, result.active_position)
         printer(f"当前状态 {state.state.value} → 复位为 {target.value}")
         if not args.yes:
             printer(f"请输入“{CONFIRMATION}”；其他输入将退出")

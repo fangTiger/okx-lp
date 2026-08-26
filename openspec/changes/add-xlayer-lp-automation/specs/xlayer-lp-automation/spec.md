@@ -398,7 +398,7 @@
 - **THEN** 入口选择 `.env` 路径；项目根不存在 `.env` 时要求显式指定来源
 
 ### Requirement: 过渡阶段状态链上对账复位
-系统 MUST 仅依据本池流动性大于零的链上头寸消除 ENTERING 与 EXITING 的歧义，并 MUST 对 REBALANCING 继续失败关闭。
+系统 MUST 依据本池流动性大于零的链上头寸消除 ENTERING 与 EXITING 的歧义。人工清锁工具 MUST 联合严格校验的再平衡进度与链上头寸判定 REBALANCING；无人值守生产入口 MUST 对 REBALANCING 继续失败关闭。
 
 #### Scenario: 建仓阶段按链上事实复位
 - **WHEN** 本地状态为 ENTERING 且链上没有本池有效头寸
@@ -412,9 +412,33 @@
 - **WHEN** 本地状态为 EXITING 且链上仍有本池有效头寸
 - **THEN** 系统保持 EXITING 供主循环继续撤出；链上已无有效头寸时复位为 IDLE
 
-#### Scenario: 再平衡阶段拒绝自动推导
-- **WHEN** 本地状态为 REBALANCING
-- **THEN** 系统非零退出并要求人工核对 `log/rebalances/` 进度与链上交易，不修改状态文件
+#### Scenario: mint 失败且资金已回到钱包
+- **WHEN** 本地状态为 REBALANCING，唯一进度已完成 burn、collect、swap 并在 mint 失败，且链上无本池有效头寸
+- **THEN** 人工清锁工具打印进度与判定依据，确认后复位为 IDLE 并清空区间
+
+#### Scenario: 再平衡四阶段已完成
+- **WHEN** 操作者显式指定 completed 含 mint 的进度，且链上存在本池有效头寸
+- **THEN** 人工清锁工具确认后复位为 IN_RANGE，并用链上头寸真实 tick 重建区间
+
+#### Scenario: burn 失败按链上头寸判定
+- **WHEN** 进度在 burn 失败
+- **THEN** 链上仍有有效头寸时复位为 IN_RANGE 并使用链上真实区间；无有效头寸时复位为 IDLE
+
+#### Scenario: collect 失败且链上无有效头寸
+- **WHEN** 进度在 collect 失败且链上无本池有效头寸
+- **THEN** 人工清锁工具确认后复位为 IDLE
+
+#### Scenario: swap 失败继续拒绝
+- **WHEN** 进度在 swap 失败
+- **THEN** 工具说明 3–5 笔拆单的部分成交数量无法由阶段日志推断，非零退出且状态文件字节不变
+
+#### Scenario: 进度记录无法唯一确定
+- **WHEN** 未完成进度为零份、多份、JSON 损坏或字段非法
+- **THEN** 工具打印候选文件名并非零退出；多份时允许操作者用 `--rebalance-id` 显式指定一份
+
+#### Scenario: 生产入口仍拒绝再平衡状态
+- **WHEN** 无人值守生产入口读取到 REBALANCING
+- **THEN** 系统抛出 RuntimeError 要求人工对账，不自动读取进度或修改状态
 
 #### Scenario: 人工清锁兼容模式
 - **WHEN** 操作者未向清锁工具传入 `--reset-state`
