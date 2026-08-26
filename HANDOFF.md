@@ -51,6 +51,27 @@ nohup .venv/bin/python tools/track_position.py > log/track_position.log 2>&1 &
 
 历史数据已快照在 `data/snapshots/`（观测器 1397 条、仓位 579 条），新采集的会写到 `log/`（不入库）。
 
+### 开发工作流：用 codex 执行
+
+本项目的编码工作交给 codex 执行，规格推导、任务拆分与验收由 Claude 负责。
+
+```bash
+# 提示词写成文件再用 stdin 传入，避免 shell 转义问题
+codex exec -C <项目绝对路径> -s workspace-write --skip-git-repo-check \
+  --output-last-message <结果文件> - < <提示词文件>
+```
+
+要点：
+- 本项目不是从 git 仓库根目录运行时可能需要 `--skip-git-repo-check`
+- 单次任务耗时可达十几分钟，建议后台运行
+- 提示词里必须**指明必读的规格文件路径**并给出**可自测的验收标准**，
+  否则 codex 容易自由发挥
+- 涉及资金安全的任务，必须明确写「绝对不要广播任何真实交易」
+
+**验收不能只看 codex 自己的测试。** 安全属性必须用攻击性输入独立验证 ——
+本项目已有先例：codex 的测试全绿，但独立审核仍从闭包里读出了私钥、
+并用真值非布尔绕过了三层广播门控。
+
 ---
 
 ## 2. 必读文件（按顺序）
