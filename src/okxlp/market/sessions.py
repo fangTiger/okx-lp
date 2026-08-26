@@ -15,6 +15,7 @@ from okxlp.config import FxWindowConfig, PoolConfig, load_config
 
 EVENT_BEFORE = timedelta(hours=4)
 EVENT_AFTER = timedelta(hours=18)
+IGNORE_LISTINGS_REASON = "（已停用时段闸门）所有上市地检查被跳过"
 
 
 @dataclass(frozen=True)
@@ -34,11 +35,16 @@ class MarketSessions:
         fx_window: FxWindowConfig,
         events: tuple[EarningsEvent, ...],
         events_error: str | None = None,
+        *,
+        ignore_listings: bool = False,
     ) -> None:
+        if type(ignore_listings) is not bool:
+            raise TypeError("ignore_listings 必须是 bool")
         self.pool = pool
         self.fx_window = fx_window
         self.events = events
         self.events_error = events_error
+        self.ignore_listings = ignore_listings
 
     @classmethod
     def from_files(
@@ -46,29 +52,43 @@ class MarketSessions:
         config_path: Path = Path("config/pools.yaml"),
         events_path: Path = Path("config/events.yaml"),
         pool_id: str | None = None,
+        *,
+        ignore_listings: bool = False,
     ) -> MarketSessions:
         """加载池与事件；事件失败被保存为 fail-safe 状态。"""
         config = load_config(config_path)
         events, error = _load_events(events_path)
-        return cls(config.find_pool(pool_id), config.fx_sunday_open, events, error)
+        return cls(
+            config.find_pool(pool_id), config.fx_sunday_open, events, error,
+            ignore_listings=ignore_listings,
+        )
 
     def should_make_market(self, now: datetime) -> tuple[bool, str]:
         """返回是否做市及中文判定依据。"""
         if now.tzinfo is None or now.utcoffset() is None:
-            return False, "当前时间缺少时区，按风险优先撤出"
+            return False, self._reason("当前时间缺少时区，按风险优先撤出")
         if self.events_error is not None:
-            return False, f"事件文件不可用（{self.events_error}），按有事件处理并撤出"
+            return False, self._reason(
+                f"事件文件不可用（{self.events_error}），按有事件处理并撤出"
+            )
         event_reason = self._earnings_reason(now)
         if event_reason is not None:
-            return False, event_reason
+            return False, self._reason(event_reason)
         if self._in_fx_window(now):
-            return False, "处于外汇周日开盘保护窗口，强制撤出"
+            return False, self._reason("处于外汇周日开盘保护窗口，强制撤出")
+        if self.ignore_listings:
+            return True, self._reason("允许做市")
         for listing in self.pool.listings:
             local = now.astimezone(ZoneInfo(listing.timezone))
             local_time = local.replace(tzinfo=None).time()
             if local.weekday() < 5 and listing.open_time <= local_time < listing.close_time:
                 return False, f"{listing.venue} 当地交易时段内，按上市地并集撤出"
         return True, "所有上市地均休市，且无财报或外汇开盘事件，允许做市"
+
+    def _reason(self, reason: str) -> str:
+        if self.ignore_listings:
+            return f"{IGNORE_LISTINGS_REASON}；{reason}"
+        return reason
 
     def _earnings_reason(self, now: datetime) -> str | None:
         current = now.astimezone(timezone.utc)

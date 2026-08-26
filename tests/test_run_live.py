@@ -15,8 +15,9 @@ from okxlp.strategy.machine_types import RiskDecision
 from okxlp.strategy.nav import NavSnapshot
 from okxlp.uniswap.tickmath import tick_to_price
 from tools.run_live import (
-    LiveRuntime, RiskSettings, _approval_requirements, build_parser,
-    _ensure_startup_write_allowed, _sync_machine_state, main, parse_args,
+    IGNORE_SESSIONS_WARNING, LiveRuntime, RiskSettings, _approval_requirements,
+    _banner, _ensure_startup_write_allowed, _market_sessions,
+    _sync_machine_state, build_parser, main, parse_args,
 )
 
 
@@ -182,6 +183,45 @@ class RunLiveGateTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("dotenv", output.lower())
         self.assertIn("temporary.env", output)
+
+    def test_ignore_sessions_warns_and_is_forwarded_to_market_sessions(self):
+        args = build_parser().parse_args([
+            "--owner", OWNER,
+            "--keystore", "temporary-keystore.json",
+            "--ignore-sessions",
+        ])
+        output = []
+
+        with patch("tools.run_live.LOGGER.warning") as warning:
+            _banner(args, RunMode.DRY_RUN, settings(), False, output.append)
+        with patch("tools.run_live.MarketSessions.from_files") as factory:
+            _market_sessions(args, SimpleNamespace(pool_id="pool-1"))
+
+        self.assertIs(args.ignore_sessions, True)
+        self.assertIn(IGNORE_SESSIONS_WARNING, "\n".join(output))
+        warning.assert_called_once_with(IGNORE_SESSIONS_WARNING)
+        factory.assert_called_once_with(
+            pool_id="pool-1", ignore_listings=True
+        )
+
+    def test_default_sessions_has_no_warning_and_forwards_false(self):
+        args = build_parser().parse_args([
+            "--owner", OWNER,
+            "--keystore", "temporary-keystore.json",
+        ])
+        output = []
+
+        with patch("tools.run_live.LOGGER.warning") as warning:
+            _banner(args, RunMode.DRY_RUN, settings(), False, output.append)
+        with patch("tools.run_live.MarketSessions.from_files") as factory:
+            _market_sessions(args, SimpleNamespace(pool_id="pool-1"))
+
+        self.assertIs(args.ignore_sessions, False)
+        self.assertNotIn(IGNORE_SESSIONS_WARNING, "\n".join(output))
+        warning.assert_not_called()
+        factory.assert_called_once_with(
+            pool_id="pool-1", ignore_listings=False
+        )
 
     def test_dry_run_mode_with_broadcast_exits_before_any_rpc_setup(self):
         code, output, calls = self.invoke(

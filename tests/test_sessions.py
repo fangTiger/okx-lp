@@ -19,16 +19,91 @@ EMPTY_EVENTS = "events: []\n"
 
 
 class SessionsTest(unittest.TestCase):
-    def _scheduler(self, events=EMPTY_EVENTS):
+    def _scheduler(self, events=EMPTY_EVENTS, *, ignore_listings=False):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "events.yaml"
             path.write_text(events, encoding="utf-8")
-            return MarketSessions.from_files(events_path=path)
+            return MarketSessions.from_files(
+                events_path=path, ignore_listings=ignore_listings
+            )
 
-    def _single_venue_scheduler(self, venue_index):
+    def _single_venue_scheduler(self, venue_index, *, ignore_listings=False):
         config = load_config(Path("config/pools.yaml"))
         pool = replace(config.pools[0], listings=(config.pools[0].listings[venue_index],))
-        return MarketSessions(pool, config.fx_sunday_open, ())
+        return MarketSessions(
+            pool, config.fx_sunday_open, (), ignore_listings=ignore_listings
+        )
+
+    def test_ignore_listings_allows_amsterdam_open_with_warning_reason(self):
+        scheduler = self._single_venue_scheduler(0, ignore_listings=True)
+
+        allowed, reason = scheduler.should_make_market(
+            datetime(2026, 8, 31, 7, 0, tzinfo=UTC)
+        )
+
+        self.assertTrue(allowed)
+        self.assertIn("已停用时段闸门", reason)
+
+    def test_ignore_listings_preserves_event_file_fail_safe(self):
+        scheduler = MarketSessions.from_files(
+            events_path=Path("不存在的-events.yaml"), ignore_listings=True
+        )
+
+        allowed, reason = scheduler.should_make_market(
+            datetime(2026, 8, 31, 7, 0, tzinfo=UTC)
+        )
+
+        self.assertFalse(allowed)
+        self.assertIn("事件文件不可用", reason)
+        self.assertIn("已停用时段闸门", reason)
+
+    def test_ignore_listings_preserves_earnings_window(self):
+        scheduler = self._scheduler(
+            "events:\n"
+            "  - type: earnings\n"
+            "    underlying: ASML\n"
+            '    published_at: "2026-08-31T12:00:00Z"\n',
+            ignore_listings=True,
+        )
+
+        allowed, reason = scheduler.should_make_market(
+            datetime(2026, 8, 31, 12, 0, tzinfo=UTC)
+        )
+
+        self.assertFalse(allowed)
+        self.assertIn("财报", reason)
+        self.assertIn("已停用时段闸门", reason)
+
+    def test_ignore_listings_preserves_fx_sunday_open_window(self):
+        scheduler = self._scheduler(ignore_listings=True)
+
+        allowed, reason = scheduler.should_make_market(
+            datetime(2026, 8, 30, 17, 0, tzinfo=NEW_YORK)
+        )
+
+        self.assertFalse(allowed)
+        self.assertIn("外汇周日开盘", reason)
+        self.assertIn("已停用时段闸门", reason)
+
+    def test_default_ignore_listings_false_preserves_listing_gate(self):
+        scheduler = self._single_venue_scheduler(0)
+
+        allowed, reason = scheduler.should_make_market(
+            datetime(2026, 8, 31, 7, 0, tzinfo=UTC)
+        )
+
+        self.assertFalse(allowed)
+        self.assertIn("Amsterdam", reason)
+
+    def test_ignore_listings_requires_exact_bool(self):
+        config = load_config(Path("config/pools.yaml"))
+
+        for invalid in (1, "true", object()):
+            with self.subTest(invalid=invalid), self.assertRaises(TypeError):
+                MarketSessions(
+                    config.pools[0], config.fx_sunday_open, (),
+                    ignore_listings=invalid,
+                )
 
     def test_us_dst_switch_uses_new_york_zone(self):
         scheduler = self._single_venue_scheduler(1)

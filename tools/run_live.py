@@ -61,6 +61,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DOTENV_PATH = Path(".env")
 PASSWORD_ENV = "OKXLP_KEYSTORE_PASSWORD"
 WIDTH_TEXT = "±0.5%"
+IGNORE_SESSIONS_WARNING = (
+    "⚠ 时段闸门已停用：将在标的交易时段内继续做市"
+    "（违反定稿 D4，由用户显式要求）"
+)
 LOGGER = logging.getLogger(__name__)
 
 
@@ -262,12 +266,13 @@ class LiveBootstrap:
 
     def __init__(
         self, *, config, pool, rpc, reader, result, policy, signer,
-        executor, fact_gate, settings, addresses, market, printer,
+        executor, fact_gate, settings, addresses, market, sessions, printer,
     ) -> None:
         self.config, self.pool, self.rpc = config, pool, rpc
         self.reader, self.result, self.policy = reader, result, policy
         self.signer, self.executor, self.fact_gate = signer, executor, fact_gate
         self.settings, self.addresses, self.market = settings, addresses, market
+        self.sessions = sessions
         self.printer = printer
         self.current_sample = market.snapshot(datetime.now(timezone.utc))
 
@@ -332,7 +337,7 @@ class LiveBootstrap:
         )
         machine = MainStateMachine(
             pool_id=self.pool.pool_id,
-            sessions=MarketSessions.from_files(pool_id=self.pool.pool_id),
+            sessions=self.sessions,
             risk_gate=risk_gate, market=self.market,
             actions=actions, rebalancer=rebalancer,
             detector=OutrangeDetector(
@@ -445,6 +450,14 @@ def _render_reconcile(result, printer: Callable[[str], None]) -> None:
         printer(f"对账 warning：{warning}")
 
 
+def _market_sessions(args, pool) -> MarketSessions:
+    """把生产入口的显式停用参数传给时段状态机。"""
+    return MarketSessions.from_files(
+        pool_id=pool.pool_id,
+        ignore_listings=args.ignore_sessions,
+    )
+
+
 def create_bootstrap(
     args, mode: RunMode, settings: RiskSettings,
     printer: Callable[[str], None],
@@ -452,6 +465,7 @@ def create_bootstrap(
     """按校验、对账、策略、签名的固定顺序准备生产资源。"""
     config = load_config(POOLS_PATH)
     pool = config.find_pool()
+    sessions = _market_sessions(args, pool)
     rpc = JsonRpcClient(
         config.chain.rpc_urls,
         chain_id=config.chain.chain_id,
@@ -510,7 +524,8 @@ def create_bootstrap(
             config=config, pool=pool, rpc=rpc, reader=reader,
             result=result, policy=policy, signer=signer,
             executor=executor, fact_gate=fact_gate, settings=settings,
-            addresses=addresses, market=market, printer=printer,
+            addresses=addresses, market=market, sessions=sessions,
+            printer=printer,
         )
     except BaseException:
         if signer is not None:
@@ -540,6 +555,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes", action="store_true",
         help="仅与 --broadcast 同用时跳过交互确认",
     )
+    parser.add_argument(
+        "--ignore-sessions", action="store_true",
+        help="显式停用上市地交易时段闸门",
+    )
     parser.add_argument("--max-iterations", type=int)
     return parser
 
@@ -566,6 +585,9 @@ def _banner(args, mode, settings, allow_broadcast, printer) -> None:
     printer(f"owner：{args.owner}")
     printer(f"运行模式：{mode.value}")
     printer(f"是否允许广播：{allow_broadcast}")
+    if args.ignore_sessions:
+        printer(IGNORE_SESSIONS_WARNING)
+        LOGGER.warning(IGNORE_SESSIONS_WARNING)
     printer(f"本金上限：{settings.total_capital_usd} USDC")
     printer(f"区间宽度：{WIDTH_TEXT}")
     printer(f"每日再平衡上限：{settings.max_rebalances_per_day}")

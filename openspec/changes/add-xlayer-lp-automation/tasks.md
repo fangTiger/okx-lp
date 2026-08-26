@@ -141,3 +141,9 @@
 - [x] 18.2 `enter` 基于配比后 desired 计算滑点下限，并允许区间外单腿为零
 - [x] 18.3 RPC 识别并解码确定性合约回滚，立即中止跨节点重试
 - [x] 18.4 完成 337 项单测、OpenSpec 校验与 risk/log 红线自查
+
+## M19 时段闸门显式停用开关（批次 13）
+- [x] 19.1 以 TDD 覆盖严格布尔、上市地跳过及事件、财报、外汇保护回归
+- [x] 19.2 为 `MarketSessions` 增加 `ignore_listings` 并由 `from_files` 透传
+- [x] 19.3 为生产入口增加 `--ignore-sessions`、醒目横幅与中文 warning 日志
+- [x] 19.4 完成全量单测、OpenSpec 校验与 config/log 红线自查
