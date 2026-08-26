@@ -6,6 +6,7 @@ import logging
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from okxlp.strategy.machine_state import (
@@ -83,9 +84,15 @@ class MainStateMachine(MachineLoop, MachineStages):
         if self.state is MachineState.EXITING and not risk.allowed and not risk.allow_exit:
             return f"保持 EXITING：风控闸门禁止撤出写链：{risk.reason}"
         if self.state is not MachineState.EXITING and guard is not None:
-            return self._transition(MachineState.EXITING, guard, sample, self.band, now)
+            transition_reason = self._transition(
+                MachineState.EXITING, guard, sample, self.band, now,
+            )
+            if not risk.allowed and not risk.allow_exit:
+                return f"保持 EXITING：风控闸门禁止撤出写链：{risk.reason}"
+            exit_reason = self._exit_stage(sample, now, allow_broadcast)
+            return f"{transition_reason}；{exit_reason}"
         if self.state is MachineState.IDLE:
-            band = self._target_band(sample.tick)
+            band = self._target_band(sample.price)
             reason = f"做市条件满足：{session_reason}；{risk.reason}"
             return self._transition(MachineState.ENTERING, reason, sample, band, now)
         if self.state is MachineState.ENTERING:
@@ -136,8 +143,10 @@ class MainStateMachine(MachineLoop, MachineStages):
             self.snapshot = updated
         return event.reason
 
-    def _target_band(self, tick: int) -> PriceBand:
-        return build_price_band(tick, self.tick_spacing, self.token0_decimals, self.token1_decimals)
+    def _target_band(self, price: Decimal) -> PriceBand:
+        return build_price_band(
+            price, self.tick_spacing, self.token0_decimals, self.token1_decimals,
+        )
 
     def _required_band(self) -> PriceBand:
         if self.band is None:

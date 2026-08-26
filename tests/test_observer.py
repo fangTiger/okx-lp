@@ -69,7 +69,14 @@ class ObserverTest(unittest.TestCase):
     def test_loads_pool_and_rpc_from_yaml(self):
         settings = load_pool_settings(Path("config/pools.yaml"), "wASMLx_USDC")
         self.assertEqual(settings.chain_id, 196)
-        self.assertEqual(settings.rpc_urls, ("https://rpc.xlayer.tech",))
+        self.assertEqual(
+            settings.rpc_urls,
+            (
+                "https://rpc.xlayer.tech",
+                "https://xlayerrpc.okx.com",
+                "https://xlayer.drpc.org",
+            ),
+        )
         self.assertEqual(settings.address, "0xc3d659028117f1ae5db9b9c68239b4a71f03ef37")
 
     def test_builds_required_record_and_shares(self):

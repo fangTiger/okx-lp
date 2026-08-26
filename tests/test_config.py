@@ -61,6 +61,11 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaises(AttributeError):
             config.chain.chain_id = 1
 
+    def test_production_config_keeps_multiple_rpc_endpoints(self):
+        config = load_config(Path("config/pools.yaml"))
+
+        self.assertGreaterEqual(len(config.chain.rpc_urls), 2)
+
     def test_actual_risk_config_contains_time_confirmation_thresholds(self):
         data = yaml.safe_load(Path("config/risk.yaml").read_text(encoding="utf-8"))
 

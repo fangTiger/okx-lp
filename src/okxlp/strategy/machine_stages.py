@@ -22,7 +22,7 @@ class MachineStages:
 
     def _rebalance_stage(self, sample: Any, now: datetime, allow_broadcast: bool) -> str:
         try:
-            target = self._target_band(sample.tick)
+            target = self._target_band(sample.price)
             actions = self.actions.rebalance_actions(sample, target)
             self.rebalancer.execute(actions, allow_broadcast=allow_broadcast)
             reason = "再平衡完成：burn → collect → swap → mint"

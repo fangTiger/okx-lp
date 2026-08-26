@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Any, Protocol
 
 from okxlp.strategy.machine_state import MachineState, PriceBand
-from okxlp.uniswap.tickmath import aligned_tick_range, tick_to_price
+from okxlp.uniswap.tickmath import aligned_tick_range_from_price, tick_to_price
 
 
 WIDTH = Decimal("0.005")
@@ -46,10 +46,15 @@ class StepResult:
 
 
 def build_price_band(
-    tick: int, tick_spacing: int, token0_decimals: int, token1_decimals: int,
+    price: Decimal,
+    tick_spacing: int,
+    token0_decimals: int,
+    token1_decimals: int,
 ) -> PriceBand:
-    """用 M1 tickmath 构造向外对齐的固定 ±0.5% 区间。"""
-    lower, upper = aligned_tick_range(tick, WIDTH, tick_spacing)
+    """以精确池价构造向外对齐的固定 ±0.5% 区间。"""
+    lower, upper = aligned_tick_range_from_price(
+        price, WIDTH, tick_spacing, token0_decimals, token1_decimals,
+    )
     return PriceBand(
         lower, upper,
         tick_to_price(lower, token0_decimals, token1_decimals),

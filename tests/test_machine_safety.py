@@ -28,6 +28,7 @@ class Stub:
         self.price = Decimal("100")
         self.broadcasts = []
         self.rebalances = 0
+        self.exit_calls = 0
         self.fail_enter = False
 
     def should_make_market(self, _now):
@@ -48,6 +49,7 @@ class Stub:
         return "actions"
 
     def exit(self, _sample, *, allow_broadcast=False):
+        self.exit_calls += 1
         self.broadcasts.append(allow_broadcast)
 
     def execute(self, _actions, *, allow_broadcast=False):

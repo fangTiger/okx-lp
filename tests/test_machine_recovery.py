@@ -115,15 +115,38 @@ class MachineRecoveryTest(unittest.TestCase):
         self.assertEqual(self.stub.broadcasts, [])
         self.assertIn("禁止撤出写链", result.reason)
 
+    def test_leaving_market_exits_in_the_same_step(self):
+        self.save(MachineSnapshot(MachineState.IN_RANGE, self.band))
+        self.stub.session = (False, "上市地交易中")
+        machine = self.machine()
+
+        result = machine.step()
+
+        self.assertEqual(result.state, MachineState.IDLE)
+        self.assertEqual(self.stub.exit_calls, 1)
+        self.assertIn("离开做市时段", result.reason)
+        self.assertIn("撤出完成", result.reason)
+
+    def test_new_exiting_state_does_not_exit_when_risk_forbids_it(self):
+        self.save(MachineSnapshot(MachineState.IN_RANGE, self.band))
+        self.stub.risk = RiskDecision(False, "HALT 存在", allow_exit=False)
+        machine = self.machine()
+
+        result = machine.step(allow_broadcast=True)
+
+        self.assertEqual(result.state, MachineState.EXITING)
+        self.assertEqual(self.stub.exit_calls, 0)
+        self.assertIn("禁止撤出写链", result.reason)
+
     def test_circuit_breaker_can_explicitly_allow_defensive_exit(self):
         self.save(MachineSnapshot(MachineState.IN_RANGE, self.band))
         self.stub.risk = RiskDecision(False, "净值熔断", allow_exit=True)
         machine = self.machine()
 
-        machine.step(allow_broadcast=True)
         result = machine.step(allow_broadcast=True)
 
         self.assertEqual(result.state, MachineState.IDLE)
+        self.assertEqual(self.stub.exit_calls, 1)
         self.assertEqual(self.stub.broadcasts, [True])
 
 

@@ -6,6 +6,8 @@ chain:
   id: 196
   rpc:
     - https://rpc.xlayer.tech
+    - https://xlayerrpc.okx.com
+    - https://xlayer.drpc.org
   explorer: https://www.xlayerscan.com
 
 pools:

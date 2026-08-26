@@ -73,6 +73,38 @@ def aligned_tick_range(current_tick: int, width: Decimal, tick_spacing: int) -> 
         return int(lower_steps) * tick_spacing, int(upper_steps) * tick_spacing
 
 
+def aligned_tick_range_from_price(
+    price: Decimal,
+    width: Decimal,
+    tick_spacing: int,
+    token0_decimals: int,
+    token1_decimals: int,
+) -> tuple[int, int]:
+    """以精确池价为中心计算区间，并把两端分别向外对齐。"""
+    if price <= 0:
+        raise ValueError("价格必须大于零")
+    if not Decimal(0) < width < Decimal(1):
+        raise ValueError("区间宽度必须位于零和一之间")
+    if tick_spacing <= 0:
+        raise ValueError("tickSpacing 必须大于零")
+    with localcontext() as context:
+        context.prec = 80
+        raw = price / _decimal_scale(token0_decimals, token1_decimals)
+        lower_raw_tick = (raw * (Decimal(1) - width)).ln() / TICK_BASE.ln()
+        upper_raw_tick = (raw * (Decimal(1) + width)).ln() / TICK_BASE.ln()
+        lower_steps = (lower_raw_tick / tick_spacing).to_integral_value(
+            rounding=ROUND_FLOOR
+        )
+        upper_steps = (upper_raw_tick / tick_spacing).to_integral_value(
+            rounding=ROUND_CEILING
+        )
+        lower = int(lower_steps) * tick_spacing
+        upper = int(upper_steps) * tick_spacing
+        if lower >= upper:
+            raise ValueError("向外对齐后的区间下沿必须小于上沿")
+        return lower, upper
+
+
 def _capital_coefficient(
     price: Decimal, width: Decimal, token0_decimals: int, token1_decimals: int
 ) -> Decimal:

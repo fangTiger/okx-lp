@@ -142,6 +142,17 @@ class MachineLifecycleTest(unittest.TestCase):
 
         self.assertEqual(self.calls[:3], ["session", "risk", "market"])
 
+    def test_initial_band_uses_the_sample_exact_price(self):
+        self.market.set("1.00009999")
+
+        result = self.step()
+
+        self.assertEqual(result.state, MachineState.ENTERING)
+        self.assertEqual(
+            (self.machine.band.tick_lower, self.machine.band.tick_upper),
+            (-50, 60),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
