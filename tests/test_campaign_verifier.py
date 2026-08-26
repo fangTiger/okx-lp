@@ -3,11 +3,19 @@ import unittest
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from okxlp.campaign.verifier import VerificationError, verify_campaign
+from okxlp.campaign.verifier import (
+    VerificationError,
+    VerificationReport,
+    main,
+    verify_campaign,
+)
 from okxlp.config import load_config
+from okxlp.exec.authorization import AuthorizationError, RunMode
 from okxlp.uniswap.pool import PoolSnapshot, TokenMetadata
 
 
@@ -92,6 +100,58 @@ class CampaignVerifierTest(unittest.TestCase):
         self.assertIn("token1.decimals", message)
         self.assertIn("配置值=6", message)
         self.assertIn("链上值=18", message)
+
+    def test_main_reports_real_dry_run_mode(self):
+        startup_result = (
+            VerificationReport(("wASMLx_USDC",), 68886709),
+            SimpleNamespace(forced_dry_run=False),
+        )
+        with (
+            patch("sys.argv", ["verifier"]),
+            patch("okxlp.campaign.verifier.run_startup", return_value=startup_result),
+            patch(
+                "okxlp.campaign.verifier.load_run_mode",
+                return_value=RunMode.DRY_RUN,
+            ),
+            self.assertLogs("okxlp.campaign.verifier", level="INFO") as logs,
+        ):
+            result = main()
+
+        self.assertEqual(result, 0)
+        self.assertIn("模式=dry_run（禁止广播）", "\n".join(logs.output))
+
+    def test_main_reports_real_live_mode(self):
+        startup_result = (
+            VerificationReport(("wASMLx_USDC",), 68886709),
+            SimpleNamespace(forced_dry_run=True),
+        )
+        with (
+            patch("sys.argv", ["verifier"]),
+            patch("okxlp.campaign.verifier.run_startup", return_value=startup_result),
+            patch(
+                "okxlp.campaign.verifier.load_run_mode",
+                return_value=RunMode.LIVE,
+            ),
+            self.assertLogs("okxlp.campaign.verifier", level="INFO") as logs,
+        ):
+            result = main()
+
+        self.assertEqual(result, 0)
+        self.assertIn("模式=live（可请求实盘）", "\n".join(logs.output))
+
+    def test_main_fails_before_rpc_when_run_mode_cannot_be_loaded(self):
+        with (
+            patch("sys.argv", ["verifier"]),
+            patch("okxlp.campaign.verifier.run_startup") as startup,
+            patch(
+                "okxlp.campaign.verifier.load_run_mode",
+                side_effect=AuthorizationError("模式配置损坏"),
+            ),
+        ):
+            result = main()
+
+        self.assertEqual(result, 2)
+        startup.assert_not_called()
 
 
 if __name__ == "__main__":

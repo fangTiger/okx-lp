@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from okxlp.exec.authorization import require_broadcast_flag
 from okxlp.exec.intent import Intent, IntentStatus
 from okxlp.strategy.allocation import (
     BalanceSnapshot,
@@ -103,13 +104,14 @@ class RebalanceOrchestrator:
         rebalance_id: str | None = None,
     ) -> RebalanceProgress:
         """强制四阶段顺序；默认仅 dry-run，不授予广播权限。"""
+        broadcast = require_broadcast_flag(allow_broadcast)
         progress = self.journal.save(RebalanceProgress(rebalance_id or uuid4().hex))
         stage = "burn"
         try:
-            progress = self._run_stage(progress, stage, ((actions.burn(), 0),), allow_broadcast)
+            progress = self._run_stage(progress, stage, ((actions.burn(), 0),), broadcast)
             stage = "collect"
             progress = self._run_stage(
-                progress, stage, ((actions.collect(), 0),), allow_broadcast
+                progress, stage, ((actions.collect(), 0),), broadcast
             )
             stage = "swap"
             requirement = calculate_50_50_swap(
@@ -117,9 +119,9 @@ class RebalanceOrchestrator:
             )
             swaps = () if requirement is None else actions.build_swap(requirement)
             scheduled = tuple((item.intent, item.delay_seconds) for item in swaps)
-            progress = self._run_stage(progress, stage, scheduled, allow_broadcast)
+            progress = self._run_stage(progress, stage, scheduled, broadcast)
             stage = "mint"
-            progress = self._run_stage(progress, stage, ((actions.mint(), 0),), allow_broadcast)
+            progress = self._run_stage(progress, stage, ((actions.mint(), 0),), broadcast)
             return progress
         except BaseException as error:
             reason = str(error) or error.__class__.__name__
@@ -131,12 +133,13 @@ class RebalanceOrchestrator:
         self, progress: RebalanceProgress, stage: str,
         scheduled: tuple[tuple[Intent, int], ...], allow_broadcast: bool,
     ) -> RebalanceProgress:
+        broadcast = require_broadcast_flag(allow_broadcast)
         ids = []
-        expected = IntentStatus.CONFIRMED if allow_broadcast else IntentStatus.DRY_RUN
+        expected = IntentStatus.CONFIRMED if broadcast is True else IntentStatus.DRY_RUN
         for intent, delay in scheduled:
             if delay:
                 self.sleep(delay)
-            result = self.executor.execute(intent, allow_broadcast=allow_broadcast)
+            result = self.executor.execute(intent, allow_broadcast=broadcast)
             if result.intent.status != expected:
                 raise RebalanceError(
                     f"Intent {intent.intent_id} 状态为 {result.intent.status.value}，期望 {expected.value}"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import ssl
 import time
 import urllib.request
@@ -10,6 +11,12 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 import certifi
+
+from okxlp.exec.authorization import (
+    AuthorizationError,
+    RunMode,
+    require_broadcast_flag,
+)
 
 
 DEFAULT_CHAIN_ID = 196
@@ -31,6 +38,51 @@ class ChainIdMismatchError(RpcError):
     """表示可访问节点不属于预期链。"""
 
 
+_DATA_PATTERN = re.compile(r"^0x(?:[0-9a-fA-F]{2})*$")
+_TRANSACTION_HASH_PATTERN = re.compile(r"^0x[0-9a-fA-F]{64}$")
+_QUANTITY_PATTERN = re.compile(r"^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$")
+
+
+def _pattern_validator(method: str, pattern: re.Pattern[str]) -> Callable[[Any], None]:
+    def validate(result: Any) -> None:
+        if not isinstance(result, str) or pattern.fullmatch(result) is None:
+            raise RpcError(f"{method} 返回的 result 格式非法")
+
+    return validate
+
+
+def _optional_object_validator(method: str) -> Callable[[Any], None]:
+    def validate(result: Any) -> None:
+        if result is not None and not isinstance(result, dict):
+            raise RpcError(f"{method} 返回的 result 格式非法")
+
+    return validate
+
+
+_RESULT_VALIDATORS: dict[str, Callable[[Any], None]] = {
+    "eth_call": _pattern_validator("eth_call", _DATA_PATTERN),
+    "eth_getCode": _pattern_validator("eth_getCode", _DATA_PATTERN),
+    "eth_sendRawTransaction": _pattern_validator(
+        "eth_sendRawTransaction", _TRANSACTION_HASH_PATTERN
+    ),
+    **{
+        method: _pattern_validator(method, _QUANTITY_PATTERN)
+        for method in (
+            "eth_chainId", "eth_blockNumber", "eth_getBalance",
+            "eth_getTransactionCount", "eth_estimateGas",
+            "eth_maxPriorityFeePerGas",
+        )
+    },
+    **{
+        method: _optional_object_validator(method)
+        for method in (
+            "eth_getTransactionReceipt", "eth_getTransactionByHash",
+            "eth_getBlockByNumber",
+        )
+    },
+}
+
+
 class JsonRpcClient:
     """仅允许只读方法的同步 JSON-RPC 客户端。"""
 
@@ -42,6 +94,7 @@ class JsonRpcClient:
         timeout: float = 10.0,
         retries: int = 2,
         backoff: float = 0.5,
+        run_mode: RunMode = RunMode.DRY_RUN,
         ssl_context: ssl.SSLContext | None = None,
         urlopen: Callable[..., Any] = urllib.request.urlopen,
         sleep: Callable[[float], None] = time.sleep,
@@ -55,6 +108,7 @@ class JsonRpcClient:
         self.timeout = timeout
         self.retries = retries
         self.backoff = backoff
+        self._run_mode = run_mode
         self.ssl_context = ssl_context or ssl.create_default_context(cafile=certifi.where())
         self._urlopen = urlopen
         self._sleep = sleep
@@ -62,6 +116,11 @@ class JsonRpcClient:
         self._preferred_index = 0
         self._verified_indexes: set[int] = set()
         self._rejected_indexes: set[int] = set()
+
+    @property
+    def run_mode(self) -> RunMode:
+        """返回构造时固定的运行模式，不提供外部赋值入口。"""
+        return self._run_mode
 
     def call(self, method: str, params: list[Any]) -> Any:
         """调用只读 RPC 方法，并在节点间故障转移。"""
@@ -118,6 +177,12 @@ class JsonRpcClient:
         self._verified_indexes.add(index)
 
     def _request(self, endpoint: str, request_id: int, method: str, params: list[Any]) -> Any:
+        allowed_methods = READ_ONLY_METHODS | {"eth_sendRawTransaction"}
+        if frozenset(_RESULT_VALIDATORS) != allowed_methods:
+            raise RpcError("RPC result 校验器集合与允许方法不一致")
+        validator = _RESULT_VALIDATORS.get(method)
+        if validator is None:
+            raise RpcError(f"{method} 没有 result 格式校验器")
         payload = json.dumps(
             {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
             separators=(",", ":"),
@@ -137,7 +202,9 @@ class JsonRpcClient:
             raise RpcError(f"{method} 返回错误：{output['error']}")
         if "result" not in output:
             raise RpcError(f"{method} 响应缺少 result")
-        return output["result"]
+        result = output["result"]
+        validator(result)
+        return result
 
     def eth_call(self, to: str, data: str, block: str = "latest") -> str:
         """执行不会改变链上状态的 eth_call。"""
@@ -151,8 +218,11 @@ class JsonRpcClient:
         self, raw_transaction: bytes, *, allow_broadcast: bool = False
     ) -> str:
         """仅在显式授权时广播原始交易；默认永远拒绝。"""
-        if not allow_broadcast:
+        broadcast = require_broadcast_flag(allow_broadcast)
+        if broadcast is not True:
             raise ValueError("交易广播默认禁用，必须显式传入 allow_broadcast=True")
+        if self.run_mode is not RunMode.LIVE:
+            raise AuthorizationError("运行模式为 dry_run，禁止广播")
         if not isinstance(raw_transaction, bytes) or not raw_transaction:
             raise ValueError("原始交易必须是非空 bytes")
         return self._execute("eth_sendRawTransaction", ["0x" + raw_transaction.hex()])

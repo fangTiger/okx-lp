@@ -1,14 +1,19 @@
+import json
 import logging
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from okxlp.chain.gas import GasQuote
-from okxlp.chain.rpc import RpcError
+from eth_utils import keccak
+
+from okxlp.chain.rpc import JsonRpcClient, RpcError
 from okxlp.chain.whitelist import WhitelistError
+from okxlp.exec.authorization import RunMode
 from okxlp.exec.executor import ExecutionError, TransactionExecutor
 from okxlp.exec.intent import Intent, IntentStatus, IntentStore
 
@@ -30,10 +35,11 @@ class RecordingWhitelist:
 
 
 class RecordingRpc:
-    def __init__(self, events, *, revert=None, receipt=None):
+    def __init__(self, events, *, revert=None, receipt=None, returned_hash=None):
         self.events = events
         self.revert = revert
         self.receipt = receipt or {"status": "0x1"}
+        self.returned_hash = returned_hash
         self.broadcasts = []
 
     def call(self, method, _params):
@@ -47,9 +53,23 @@ class RecordingRpc:
         raise AssertionError(f"未预期 RPC：{method}")
 
     def send_raw_transaction(self, raw, *, allow_broadcast=False):
-        self.events.append("广播")
+        self.events.append("eth_sendRawTransaction")
         self.broadcasts.append((raw, allow_broadcast))
-        return "0x" + "ab" * 32
+        return self.returned_hash or "0x" + keccak(raw).hex()
+
+
+class FakeResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload).encode()
 
 
 class RecordingGas:
@@ -159,6 +179,96 @@ class TransactionExecutorTest(unittest.TestCase):
         self.assertEqual(len(self.rpc.broadcasts), 1)
         self.assertTrue(self.rpc.broadcasts[0][1])
         self.assertIn("eth_getTransactionReceipt", self.events)
+
+    def test_non_boolean_broadcast_permissions_are_rejected_at_execute_entry(self):
+        for value in (1, "true", object()):
+            with self.subTest(value=value):
+                with self.assertRaises(TypeError):
+                    self._executor().execute(
+                        Intent.create(TARGET, "0x88316456"), allow_broadcast=value
+                    )
+
+        self.assertNotIn("eth_sendRawTransaction", self.events)
+        self.assertEqual(self.rpc.broadcasts, [])
+
+    def test_non_boolean_broadcast_permissions_are_rejected_at_signed_boundary(self):
+        intent = Intent.create(TARGET, "0x88316456")
+        persisted = self.store.persist(intent)
+        signed = self.store.save(
+            replace(
+                persisted, status=IntentStatus.SIGNED,
+                transaction={"chainId": 196}, tx_hash="0x" + "00" * 32,
+            )
+        )
+
+        for value in (1, "true", object()):
+            with self.subTest(value=value):
+                with self.assertRaises(TypeError):
+                    self._executor()._finish_signed(signed, value)
+
+        self.assertNotIn("eth_sendRawTransaction", self.events)
+
+    def test_malformed_eth_call_fails_intent_without_broadcast(self):
+        for malformed in ({"malformed": True}, 123, "nothex", "0xzz", None):
+            with self.subTest(result=malformed), tempfile.TemporaryDirectory() as directory:
+                methods = []
+
+                def opener(request, **_kwargs):
+                    body = json.loads(request.data)
+                    methods.append(body["method"])
+                    result = "0xc4" if body["method"] == "eth_chainId" else malformed
+                    return FakeResponse(
+                        {"jsonrpc": "2.0", "id": body["id"], "result": result}
+                    )
+
+                rpc = JsonRpcClient(
+                    ["https://fake.invalid"], retries=0, urlopen=opener,
+                    run_mode=RunMode.LIVE,
+                )
+                store = IntentStore(Path(directory))
+                executor = TransactionExecutor(
+                    rpc=rpc, signer=RecordingSigner([]),
+                    nonce_manager=RecordingNonce([]), gas_estimator=RecordingGas([]),
+                    whitelist=RecordingWhitelist([]), store=store, chain_id=196,
+                )
+                intent = Intent.create(TARGET, "0x88316456")
+
+                with self.assertRaisesRegex(ExecutionError, "result 格式非法"):
+                    executor.execute(intent, allow_broadcast=True)
+
+                self.assertEqual(store.load(intent.intent_id).status, IntentStatus.FAILED)
+                self.assertNotIn("eth_sendRawTransaction", methods)
+
+    def test_mismatched_returned_hash_fails_without_waiting_for_receipt(self):
+        self.rpc.returned_hash = "0x" + "ab" * 32
+        intent = Intent.create(TARGET, "0x88316456")
+
+        with self.assertRaisesRegex(ExecutionError, "本地签名不一致"):
+            self._executor().execute(intent, allow_broadcast=True)
+
+        stored = self.store.load(intent.intent_id)
+        self.assertEqual(stored.status, IntentStatus.FAILED)
+        self.assertIn("本地=", stored.error)
+        self.assertIn("节点=", stored.error)
+        self.assertNotIn("eth_getTransactionReceipt", self.events)
+
+    def test_signed_recovery_recomputes_expected_hash_before_comparison(self):
+        stale_hash = "0x" + "ab" * 32
+        self.rpc.returned_hash = stale_hash
+        intent = Intent.create(TARGET, "0x88316456")
+        persisted = self.store.persist(intent)
+        self.store.save(
+            replace(
+                persisted, status=IntentStatus.SIGNED,
+                transaction={"chainId": 196}, tx_hash=stale_hash,
+            )
+        )
+
+        with self.assertRaisesRegex(ExecutionError, "本地签名不一致"):
+            self._executor().execute(intent, allow_broadcast=True)
+
+        self.assertEqual(self.store.load(intent.intent_id).status, IntentStatus.FAILED)
+        self.assertNotIn("eth_getTransactionReceipt", self.events)
 
 
 if __name__ == "__main__":

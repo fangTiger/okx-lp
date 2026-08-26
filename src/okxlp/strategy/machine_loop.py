@@ -5,17 +5,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
+from okxlp.exec.authorization import require_broadcast_flag
 from okxlp.strategy.machine_types import RiskDecision, StepResult
 
 
 LOGGER = logging.getLogger("okxlp.strategy.machine")
-
-
-def strict_broadcast_flag(value: bool) -> bool:
-    """只接受真正的布尔值，避免其他真值意外开启广播。"""
-    if type(value) is not bool:
-        raise TypeError("allow_broadcast 必须是布尔值，且只有 True 才允许广播")
-    return value
 
 
 class MachineLoop:
@@ -27,7 +21,7 @@ class MachineLoop:
         make_market, session_reason = False, "时段检查未完成"
         risk = RiskDecision(False, "风控检查未完成")
         try:
-            broadcast = strict_broadcast_flag(allow_broadcast)
+            broadcast = require_broadcast_flag(allow_broadcast)
             make_market, session_reason = self.sessions.should_make_market(now)
             risk = self.risk_gate.check(now)
             if not isinstance(risk, RiskDecision):
@@ -49,7 +43,7 @@ class MachineLoop:
         max_iterations: int | None = None,
     ) -> None:
         """持续运行；只有显式布尔值 True 才把广播权限传给执行层。"""
-        broadcast = strict_broadcast_flag(allow_broadcast)
+        broadcast = require_broadcast_flag(allow_broadcast)
         if max_iterations is not None and max_iterations <= 0:
             raise ValueError("max_iterations 必须大于零")
         count = 0

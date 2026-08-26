@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 from eth_utils import keccak, to_checksum_address
 
+from okxlp.exec.authorization import require_broadcast_flag
 from okxlp.exec.intent import Intent, IntentStatus, IntentStore, TERMINAL_STATUSES
 
 
@@ -65,6 +66,7 @@ class TransactionExecutor:
 
     def execute(self, intent: Intent, *, allow_broadcast: bool = False) -> ExecutionResult:
         """执行安全流水线；只有显式授权时才调用广播函数。"""
+        broadcast = require_broadcast_flag(allow_broadcast)
         LOGGER.info("Intent %s 开始白名单校验", intent.intent_id)
         try:
             selector = self.whitelist.validate(intent.target, intent.calldata)
@@ -80,7 +82,7 @@ class TransactionExecutor:
         if current.status == IntentStatus.SENT:
             return self._resume_sent(current)
         if current.status == IntentStatus.SIGNED and current.transaction:
-            return self._finish_signed(current, allow_broadcast)
+            return self._finish_signed(current, broadcast)
 
         rpc_transaction = {
             "from": self.signer.address, "to": intent.target,
@@ -129,15 +131,17 @@ class TransactionExecutor:
             )
         )
         LOGGER.info("Intent %s 签名完成，预期交易哈希：%s", intent.intent_id, tx_hash)
-        return self._finish_signed(current, allow_broadcast, raw)
+        return self._finish_signed(current, broadcast, raw)
 
     def _finish_signed(
         self, intent: Intent, allow_broadcast: bool, raw: bytes | None = None
     ) -> ExecutionResult:
+        broadcast = require_broadcast_flag(allow_broadcast)
         transaction = intent.transaction or {}
         if raw is None:
             raw = self.signer.sign_transaction(transaction)
-        if not allow_broadcast:
+        expected_hash = "0x" + keccak(raw).hex()
+        if broadcast is not True:
             rendered = json.dumps(transaction, ensure_ascii=False, sort_keys=True)
             self.printer(f"dry-run 完整交易内容：{rendered}")
             dry_run = self.store.save(replace(intent, status=IntentStatus.DRY_RUN))
@@ -150,6 +154,14 @@ class TransactionExecutor:
             self.store.save(replace(intent, status=IntentStatus.FAILED, error=reason))
             LOGGER.error("Intent %s 广播失败：%s", intent.intent_id, reason)
             raise ExecutionError(f"交易广播失败：{reason}") from None
+        if returned_hash.lower() != expected_hash.lower():
+            reason = (
+                "节点返回的交易哈希与本地签名不一致："
+                f"本地={expected_hash}，节点={returned_hash}"
+            )
+            self.store.save(replace(intent, status=IntentStatus.FAILED, error=reason))
+            LOGGER.error("Intent %s %s", intent.intent_id, reason)
+            raise ExecutionError("节点返回的交易哈希与本地签名不一致，已中止")
         sent = self.store.save(
             replace(intent, status=IntentStatus.SENT, tx_hash=returned_hash)
         )

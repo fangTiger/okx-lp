@@ -3,11 +3,14 @@ import ssl
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from urllib.error import URLError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import okxlp.chain.rpc as rpc_module
 from okxlp.chain.rpc import ChainIdMismatchError, JsonRpcClient, RpcError
+from okxlp.exec.authorization import AuthorizationError, RunMode
 
 
 class FakeResponse:
@@ -183,6 +186,123 @@ class RpcClientTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "广播默认禁用"):
             client.send_raw_transaction(b"\x01")
+
+    def test_non_boolean_broadcast_permissions_are_rejected_before_transport(self):
+        calls = []
+        client = JsonRpcClient(
+            run_mode=RunMode.LIVE,
+            urlopen=lambda *_args, **_kwargs: calls.append("urlopen"),
+        )
+
+        for value in (1, "true", object()):
+            with self.subTest(value=value):
+                with self.assertRaises(TypeError):
+                    client.send_raw_transaction(b"\x01", allow_broadcast=value)
+
+        self.assertEqual(calls, [])
+
+    def test_dry_run_mode_blocks_broadcast_before_transport(self):
+        calls = []
+        client = JsonRpcClient(
+            run_mode=RunMode.DRY_RUN,
+            urlopen=lambda *_args, **_kwargs: calls.append("urlopen"),
+        )
+
+        with self.assertRaisesRegex(AuthorizationError, "dry_run"):
+            client.send_raw_transaction(b"\x01", allow_broadcast=True)
+
+        self.assertEqual(calls, [])
+
+    def test_run_mode_property_cannot_be_reassigned(self):
+        client = JsonRpcClient(run_mode=RunMode.DRY_RUN)
+
+        with self.assertRaises(AttributeError):
+            client.run_mode = RunMode.LIVE
+
+        self.assertIs(client.run_mode, RunMode.DRY_RUN)
+
+    def test_malformed_eth_call_results_are_rejected(self):
+        for malformed in ({"malformed": True}, 123, "nothex", "0xzz", None):
+            with self.subTest(result=malformed):
+                methods = []
+
+                def opener(request, **_kwargs):
+                    body = json.loads(request.data)
+                    methods.append(body["method"])
+                    result = "0xc4" if body["method"] == "eth_chainId" else malformed
+                    return FakeResponse(
+                        {"jsonrpc": "2.0", "id": body["id"], "result": result}
+                    )
+
+                client = JsonRpcClient(retries=0, urlopen=opener)
+                with self.assertRaisesRegex(RpcError, "eth_call.*result 格式非法"):
+                    client.eth_call("0x" + "12" * 20, "0x1234")
+                self.assertNotIn("eth_sendRawTransaction", methods)
+
+    def test_invalid_quantity_results_are_rejected(self):
+        methods = (
+            "eth_chainId", "eth_blockNumber", "eth_getBalance",
+            "eth_getTransactionCount", "eth_estimateGas",
+            "eth_maxPriorityFeePerGas",
+        )
+        for method in methods:
+            with self.subTest(method=method):
+                def opener(request, **_kwargs):
+                    body = json.loads(request.data)
+                    result = "0xc4" if body["method"] == "eth_chainId" else "0x00"
+                    if method == "eth_chainId":
+                        result = "0x00"
+                    return FakeResponse(
+                        {"jsonrpc": "2.0", "id": body["id"], "result": result}
+                    )
+
+                client = JsonRpcClient(retries=0, urlopen=opener)
+                with self.assertRaisesRegex(RpcError, "result 格式非法"):
+                    client.call(method, [])
+
+    def test_invalid_data_object_and_transaction_hash_results_are_rejected(self):
+        invalid_results = {
+            "eth_getCode": "0x0",
+            "eth_getTransactionReceipt": [],
+            "eth_getTransactionByHash": [],
+            "eth_getBlockByNumber": [],
+        }
+        for method, invalid in invalid_results.items():
+            with self.subTest(method=method):
+                def opener(request, **_kwargs):
+                    body = json.loads(request.data)
+                    result = "0xc4" if body["method"] == "eth_chainId" else invalid
+                    return FakeResponse(
+                        {"jsonrpc": "2.0", "id": body["id"], "result": result}
+                    )
+
+                client = JsonRpcClient(retries=0, urlopen=opener)
+                with self.assertRaisesRegex(RpcError, "result 格式非法"):
+                    client.call(method, [])
+
+        def hash_opener(request, **_kwargs):
+            body = json.loads(request.data)
+            result = "0xc4" if body["method"] == "eth_chainId" else "0xab"
+            return FakeResponse({"jsonrpc": "2.0", "id": body["id"], "result": result})
+
+        client = JsonRpcClient(
+            retries=0, urlopen=hash_opener, run_mode=RunMode.LIVE
+        )
+        with self.assertRaisesRegex(RpcError, "result 格式非法"):
+            client.send_raw_transaction(b"\x01", allow_broadcast=True)
+
+    def test_validator_method_set_mismatch_is_rejected_before_transport(self):
+        calls = []
+        client = JsonRpcClient(
+            retries=0,
+            urlopen=lambda *_args, **_kwargs: calls.append("urlopen"),
+        )
+
+        with patch.dict(rpc_module._RESULT_VALIDATORS, {}, clear=True):
+            with self.assertRaisesRegex(RpcError, "校验器集合"):
+                client.call("eth_chainId", [])
+
+        self.assertEqual(calls, [])
 
     def test_rejects_explicit_empty_endpoint_list(self):
         with self.assertRaisesRegex(ValueError, "至少"):

@@ -12,6 +12,7 @@ from typing import Any, Callable
 from okxlp.campaign.gate import FactGate, load_fact_gate
 from okxlp.chain.rpc import JsonRpcClient
 from okxlp.config import AppConfig, PoolConfig, load_config
+from okxlp.exec.authorization import RunMode, load_run_mode
 from okxlp.uniswap.pool import PoolSnapshot, UniswapV3Pool
 
 
@@ -117,11 +118,15 @@ def main() -> int:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
-        report, gate = run_startup(args.config, args.facts)
+        run_mode = load_run_mode()
+        report, _gate = run_startup(args.config, args.facts)
     except Exception as error:
         LOGGER.error("启动校验未通过：%s", error)
         return 2
-    mode = "dry-run" if gate.forced_dry_run else "可请求实盘"
+    mode = (
+        "dry_run（禁止广播）"
+        if run_mode is RunMode.DRY_RUN else "live（可请求实盘）"
+    )
     LOGGER.info("链上校验通过：池=%s，区块=%s，模式=%s", ",".join(report.verified_pool_ids), report.block, mode)
     return 0
 

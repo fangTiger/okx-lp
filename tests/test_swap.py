@@ -18,8 +18,9 @@ RECIPIENT = "0x1111111111111111111111111111111111111111"
 
 
 class QuoteRpc:
-    def __init__(self):
+    def __init__(self, amount_out=None):
         self.calls = []
+        self.amount_out = amount_out
 
     def eth_call(self, to, data, block="latest"):
         self.calls.append((to, data, block))
@@ -27,7 +28,7 @@ class QuoteRpc:
             ["(address,address,uint256,uint24,uint160)"],
             bytes.fromhex(data[10:]),
         )[0]
-        amount_out = params[2] * 2
+        amount_out = params[2] * 2 if self.amount_out is None else self.amount_out
         return "0x" + encode(
             ["uint256", "uint160", "uint32", "uint256"],
             [amount_out, 123456, 2, 150000],
@@ -100,6 +101,23 @@ class SwapRouterTest(unittest.TestCase):
             )
 
         self.assertEqual(self.rpc.calls, [])
+
+    def test_zero_amount_out_minimum_is_rejected(self):
+        router = SwapRouter(
+            rpc=QuoteRpc(amount_out=1),
+            router_address=ROUTER,
+            quoter_address=QUOTER,
+            policy=self.policy,
+        )
+
+        with self.assertRaisesRegex(ValueError, "最低到账数量为零"):
+            router.quote_exact_input_single(
+                token_in=TOKEN_IN,
+                token_out=TOKEN_OUT,
+                fee=500,
+                amount_in=1,
+                slippage_bps=Decimal("30"),
+            )
 
     def test_amount_below_threshold_stays_single(self):
         plan = self.router.plan_exact_input_single(

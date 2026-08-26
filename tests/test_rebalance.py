@@ -14,6 +14,7 @@ from okxlp.strategy.rebalance import (
     RebalanceError,
     RebalanceJournal,
     RebalanceOrchestrator,
+    RebalanceProgress,
     calculate_50_50_swap,
 )
 from okxlp.uniswap.swap import ScheduledSwap, SwapQuote
@@ -40,10 +41,13 @@ class RecordingExecutor:
     def __init__(self, events, fail_at=None):
         self.events = events
         self.fail_at = fail_at
+        self.rpc_methods = []
 
     def execute(self, current, *, allow_broadcast=False):
         label = current.transaction["label"]
         self.events.append(f"execute_{label}:{allow_broadcast}")
+        if allow_broadcast:
+            self.rpc_methods.append("eth_sendRawTransaction")
         if label == self.fail_at:
             raise RuntimeError("注入失败")
         status = IntentStatus.CONFIRMED if allow_broadcast else IntentStatus.DRY_RUN
@@ -124,6 +128,44 @@ class RebalanceTest(unittest.TestCase):
         self.assertEqual(saved["completed"], ["burn", "collect"])
         self.assertEqual(saved["failed_stage"], "swap")
         self.assertIn("注入失败", saved["error"])
+
+    def test_non_boolean_broadcast_permissions_are_rejected_at_execute_entry(self):
+        for index, value in enumerate((1, "true", object())):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                events = []
+                executor = RecordingExecutor(events)
+                orchestrator = RebalanceOrchestrator(
+                    executor=executor,
+                    journal=RebalanceJournal(Path(directory)),
+                    sleep=lambda _seconds: None,
+                )
+
+                with self.assertRaises(TypeError):
+                    orchestrator.execute(
+                        self._actions(events), allow_broadcast=value,
+                        rebalance_id=f"invalid-{index}",
+                    )
+
+                self.assertNotIn("eth_sendRawTransaction", executor.rpc_methods)
+
+    def test_non_boolean_broadcast_permissions_are_rejected_at_stage_boundary(self):
+        for index, value in enumerate((1, "true", object())):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                events = []
+                executor = RecordingExecutor(events)
+                orchestrator = RebalanceOrchestrator(
+                    executor=executor,
+                    journal=RebalanceJournal(Path(directory)),
+                    sleep=lambda _seconds: None,
+                )
+                progress = RebalanceProgress(f"invalid-stage-{index}")
+
+                with self.assertRaises(TypeError):
+                    orchestrator._run_stage(
+                        progress, "burn", ((intent("burn"), 0),), value
+                    )
+
+                self.assertNotIn("eth_sendRawTransaction", executor.rpc_methods)
 
     @staticmethod
     def _actions(events):

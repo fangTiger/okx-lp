@@ -128,6 +128,8 @@ class SwapRouter:
                 rounding=ROUND_FLOOR
             )
         )
+        if minimum <= 0:
+            raise ValueError("最低到账数量为零，拒绝无保护的 swap")
         return SwapQuote(amount_in, amount_out, minimum, sqrt_after, ticks, gas, selected)
 
     def exact_input_single(
