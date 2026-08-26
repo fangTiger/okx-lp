@@ -1,3 +1,4 @@
+import inspect
 import unittest
 from dataclasses import replace
 from decimal import Decimal, ROUND_FLOOR
@@ -43,6 +44,9 @@ MINT_REGRESSION_SAMPLE = MarketSample(
     price_to_sqrt_price_x96(MINT_REGRESSION_PRICE, 18, 6),
 )
 BAND = PriceBand(-201_591, -201_463, Decimal("1990"), Decimal("2010"))
+WIDE_BAND = PriceBand(
+    BAND.tick_lower, BAND.tick_upper, Decimal("1700"), Decimal("2100")
+)
 MINT_REGRESSION_BAND = PriceBand(
     -201_730, -201_620, Decimal("1735"), Decimal("1755"),
 )
@@ -180,10 +184,14 @@ class CountingPositionManager:
 class RecordingExecutor:
     def __init__(self, fail_on=None):
         self.intents = []
+        self.simulation_checks = []
         self.fail_on = fail_on
 
-    def execute(self, intent, *, allow_broadcast=False):
+    def execute(
+        self, intent, *, allow_broadcast=False, simulation_check=None,
+    ):
         self.intents.append(intent)
+        self.simulation_checks.append(simulation_check)
         if self.fail_on == len(self.intents):
             raise RuntimeError("注入执行失败")
         status = (
@@ -196,7 +204,7 @@ class RecordingExecutor:
 def make_actions(
     *, reader=None, fact_limit=Decimal("100"), executor=None,
     approval_manager=None, position_manager=None, swap_router=None,
-    dust_threshold_raw=10**12,
+    dust_threshold_raw=10**12, pool_snapshot_reader=None,
 ):
     dependencies = SimpleNamespace(
         reader=reader or SequenceReader(),
@@ -219,6 +227,10 @@ def make_actions(
         deadline_seconds=300,
         clock=lambda: 2_000_000_000,
         dust_threshold_raw=dust_threshold_raw,
+        pool_snapshot_reader=(
+            (lambda: SAMPLE)
+            if pool_snapshot_reader is None else pool_snapshot_reader
+        ),
     )
     return actions, dependencies
 
@@ -262,11 +274,21 @@ class ProductionEnterTest(unittest.TestCase):
     def _usdc_raw(amount):
         return int(Decimal(str(amount)) * Decimal(10**6))
 
+    def test_pool_snapshot_reader_is_required_constructor_dependency(self):
+        parameter = inspect.signature(ProductionActions).parameters[
+            "pool_snapshot_reader"
+        ]
+
+        self.assertIs(parameter.default, inspect.Parameter.empty)
+
     def test_fresh_enter_swaps_25_usdc_to_asset(self):
         reader = SequenceReader(snapshot(balance0=0, balance1=self._usdc_raw("199.69")))
-        actions, dependencies = make_actions(reader=reader, fact_limit=50)
+        actions, dependencies = make_actions(
+            reader=reader, fact_limit=50,
+            pool_snapshot_reader=lambda: FAILURE_SAMPLE,
+        )
 
-        actions.enter(FAILURE_SAMPLE, BAND)
+        actions.enter(FAILURE_SAMPLE, WIDE_BAND)
 
         call = dependencies.swap_router.calls[0]
         self.assertEqual(len(dependencies.swap_router.calls), 1)
@@ -279,9 +301,12 @@ class ProductionEnterTest(unittest.TestCase):
         reader = SequenceReader(
             snapshot(balance0=asset_raw, balance1=self._usdc_raw("174.69"))
         )
-        actions, dependencies = make_actions(reader=reader, fact_limit=50)
+        actions, dependencies = make_actions(
+            reader=reader, fact_limit=50,
+            pool_snapshot_reader=lambda: FAILURE_SAMPLE,
+        )
 
-        actions.enter(FAILURE_SAMPLE, BAND)
+        actions.enter(FAILURE_SAMPLE, WIDE_BAND)
 
         self.assertEqual(dependencies.swap_router.calls, [])
         mint = decode_mint(dependencies.executor.intents[-1])
@@ -295,7 +320,7 @@ class ProductionEnterTest(unittest.TestCase):
             mint[5:7],
             mint_amounts_for_budget(
                 asset_raw, expected_usdc,
-                BAND.tick_lower, BAND.tick_upper,
+                WIDE_BAND.tick_lower, WIDE_BAND.tick_upper,
                 FAILURE_SAMPLE.sqrt_price_x96,
             ),
         )
@@ -307,9 +332,12 @@ class ProductionEnterTest(unittest.TestCase):
                 balance1=self._usdc_raw("174.69"),
             )
         )
-        actions, dependencies = make_actions(reader=reader, fact_limit=50)
+        actions, dependencies = make_actions(
+            reader=reader, fact_limit=50,
+            pool_snapshot_reader=lambda: FAILURE_SAMPLE,
+        )
 
-        actions.enter(FAILURE_SAMPLE, BAND)
+        actions.enter(FAILURE_SAMPLE, WIDE_BAND)
 
         call = dependencies.swap_router.calls[0]
         expected_raw = int(
@@ -331,17 +359,23 @@ class ProductionEnterTest(unittest.TestCase):
         reader = SequenceReader(
             snapshot(balance0=asset_raw, balance1=self._usdc_raw("174.69"))
         )
-        actions, dependencies = make_actions(reader=reader, fact_limit=50)
+        actions, dependencies = make_actions(
+            reader=reader, fact_limit=50,
+            pool_snapshot_reader=lambda: FAILURE_SAMPLE,
+        )
 
-        actions.enter(FAILURE_SAMPLE, BAND)
+        actions.enter(FAILURE_SAMPLE, WIDE_BAND)
 
         self.assertEqual(dependencies.swap_router.calls, [])
 
     def test_insufficient_usdc_narrows_capital_and_swaps_half(self):
         reader = SequenceReader(snapshot(balance0=0, balance1=self._usdc_raw("10")))
-        actions, dependencies = make_actions(reader=reader, fact_limit=50)
+        actions, dependencies = make_actions(
+            reader=reader, fact_limit=50,
+            pool_snapshot_reader=lambda: FAILURE_SAMPLE,
+        )
 
-        actions.enter(FAILURE_SAMPLE, BAND)
+        actions.enter(FAILURE_SAMPLE, WIDE_BAND)
 
         call = dependencies.swap_router.calls[0]
         self.assertEqual((call["token_in"], call["token_out"]), (TOKEN1, TOKEN0))
@@ -355,29 +389,35 @@ class ProductionEnterTest(unittest.TestCase):
             snapshot(balance0=0, balance1=self._usdc_raw("199.69")),
             snapshot(balance0=after_swap_asset, balance1=after_swap_usdc),
         )
-        actions, dependencies = make_actions(reader=reader, fact_limit=50)
+        actions, dependencies = make_actions(
+            reader=reader, fact_limit=50,
+            pool_snapshot_reader=lambda: FAILURE_SAMPLE,
+        )
 
-        actions.enter(FAILURE_SAMPLE, BAND, allow_broadcast=True)
+        actions.enter(FAILURE_SAMPLE, WIDE_BAND, allow_broadcast=True)
 
         mint = decode_mint(dependencies.executor.intents[-1])
         self.assertEqual(
             mint[5:7],
             mint_amounts_for_budget(
                 after_swap_asset, after_swap_usdc,
-                BAND.tick_lower, BAND.tick_upper,
+                WIDE_BAND.tick_lower, WIDE_BAND.tick_upper,
                 FAILURE_SAMPLE.sqrt_price_x96,
             ),
         )
         self.assertEqual(len(reader.calls), 2)
         self.assertEqual(len(dependencies.fact_gate.calls), 1)
-        self.assertGreater(mint[7], 0)
+        self.assertEqual(mint[7], 0)
         self.assertEqual(mint[8], 0)
 
     def test_mint_desired_uses_exact_band_ratio_within_wallet_budgets(self):
         budget0 = 14_364_270_543_869_171
         budget1 = 24_928_642
         reader = SequenceReader(snapshot(balance0=budget0, balance1=budget1))
-        actions, dependencies = make_actions(reader=reader, fact_limit=100)
+        actions, dependencies = make_actions(
+            reader=reader, fact_limit=100,
+            pool_snapshot_reader=lambda: MINT_REGRESSION_SAMPLE,
+        )
 
         actions.enter(MINT_REGRESSION_SAMPLE, MINT_REGRESSION_BAND)
 
@@ -391,39 +431,155 @@ class ProductionEnterTest(unittest.TestCase):
         )
         self.assertEqual(mint[5:7], expected)
 
-    def test_mint_minimums_apply_slippage_to_ratio_not_budgets(self):
-        budget0 = 14_364_270_543_869_171
-        budget1 = 24_928_642
-        reader = SequenceReader(snapshot(balance0=budget0, balance1=budget1))
-        actions, dependencies = make_actions(reader=reader, fact_limit=100)
+    def test_incident_narrow_band_mint_uses_zero_per_leg_minimums(self):
+        budget0 = 14_242_824_627_958_472
+        budget1 = 24_880_000
+        band = PriceBand(
+            -201_710, -201_600,
+            tick_to_price(-201_710, 18, 6),
+            tick_to_price(-201_600, 18, 6),
+        )
+        baseline_price = Decimal("1747")
+        baseline_sqrt = price_to_sqrt_price_x96(baseline_price, 18, 6)
+        actions, _dependencies = make_actions()
 
-        actions.enter(MINT_REGRESSION_SAMPLE, MINT_REGRESSION_BAND)
+        baseline = actions._mint_params(
+            budget0, budget1, band, baseline_sqrt
+        )
+
+        self.assertEqual(baseline[2:], (0, 0))
+        old_minimums = tuple(
+            value * (10_000 - 30) // 10_000 for value in baseline[:2]
+        )
+        moved_amounts = {}
+        for price in (
+            Decimal("1745.25"), Decimal("1748.75"), Decimal("1740.01")
+        ):
+            with self.subTest(price=price):
+                actual = mint_amounts_for_budget(
+                    budget0, budget1, band.tick_lower, band.tick_upper,
+                    price_to_sqrt_price_x96(price, 18, 6),
+                )
+                moved_amounts[price] = actual
+                self.assertGreaterEqual(actual[0], baseline[2])
+                self.assertGreaterEqual(actual[1], baseline[3])
+        self.assertLess(
+            moved_amounts[Decimal("1745.25")][1], old_minimums[1]
+        )
+
+    def test_mint_simulation_check_accepts_52_8_percent_and_rejects_40(self):
+        budget0 = 14_242_824_627_958_472
+        budget1 = 24_880_000
+        actions, _dependencies = make_actions()
+        check = actions._mint_simulation_check(
+            budget0, budget1, Decimal("1740.01")
+        )
+
+        def result(amount0, amount1):
+            return "0x" + encode(
+                ["uint256", "uint128", "uint256", "uint256"],
+                [15_857, 21_126_254_269_852, amount0, amount1],
+            ).hex()
+
+        moved_amounts = mint_amounts_for_budget(
+            budget0, budget1, -201_710, -201_600,
+            price_to_sqrt_price_x96(Decimal("1740.01"), 18, 6),
+        )
+        budget_usd = (
+            Decimal(budget0) / Decimal(10**18) * Decimal("1740.01")
+            + Decimal(budget1) / Decimal(10**6)
+        )
+        deposited_usd = (
+            Decimal(moved_amounts[0]) / Decimal(10**18)
+            * Decimal("1740.01")
+            + Decimal(moved_amounts[1]) / Decimal(10**6)
+        )
+        self.assertAlmostEqual(
+            deposited_usd / budget_usd,
+            Decimal("0.528"),
+            delta=Decimal("0.001"),
+        )
+        check(result(*moved_amounts))
+        with self.assertRaisesRegex(
+            ActionError, "实际存入.*预算.*5000 bps"
+        ):
+            check(result(
+                budget0 * 4_000 // 10_000,
+                budget1 * 4_000 // 10_000,
+            ))
+
+    def test_enter_mint_uses_fresh_pool_snapshot_price(self):
+        budget0 = 14_242_824_627_958_472
+        budget1 = 24_880_000
+        baseline = MarketSample(
+            Decimal("1747"), price_to_tick(Decimal("1747"), 18, 6),
+            price_to_sqrt_price_x96(Decimal("1747"), 18, 6),
+        )
+        latest = MarketSample(
+            Decimal("1748.75"), price_to_tick(Decimal("1748.75"), 18, 6),
+            price_to_sqrt_price_x96(Decimal("1748.75"), 18, 6),
+        )
+        band = PriceBand(
+            -201_710, -201_600,
+            tick_to_price(-201_710, 18, 6),
+            tick_to_price(-201_600, 18, 6),
+        )
+        actions, dependencies = make_actions(
+            reader=SequenceReader(snapshot(balance0=budget0, balance1=budget1)),
+            fact_limit=100, pool_snapshot_reader=lambda: latest,
+        )
+
+        actions.enter(baseline, band)
 
         mint = decode_mint(dependencies.executor.intents[-1])
-        self.assertLess(mint[5], budget0)
-        self.assertEqual(mint[7], expected_minimum(mint[5]))
-        self.assertEqual(mint[8], expected_minimum(mint[6]))
-        self.assertNotEqual(mint[7], expected_minimum(budget0))
+        latest_expected = mint_amounts_for_budget(
+            budget0, budget1, band.tick_lower, band.tick_upper,
+            latest.sqrt_price_x96,
+        )
+        baseline_expected = mint_amounts_for_budget(
+            budget0, budget1, band.tick_lower, band.tick_upper,
+            baseline.sqrt_price_x96,
+        )
+        self.assertEqual(mint[5:7], latest_expected)
+        self.assertNotEqual(mint[5:7], baseline_expected)
+        self.assertIsNotNone(dependencies.executor.simulation_checks[-1])
 
-    def test_mint_minimum_uses_exact_floor_for_large_raw_amount(self):
-        actions, _dependencies = make_actions()
-        desired = 10_000_000_000_000_000_000_123_456_789
+    def test_enter_rejects_fresh_price_outside_band_without_mint_intent(self):
+        latest = MarketSample(
+            Decimal("1760"), price_to_tick(Decimal("1760"), 18, 6),
+            price_to_sqrt_price_x96(Decimal("1760"), 18, 6),
+        )
+        position = CountingPositionManager()
+        actions, dependencies = make_actions(
+            reader=SequenceReader(snapshot(
+                balance0=14_242_824_627_958_472, balance1=24_880_000,
+            )),
+            position_manager=position, fact_limit=100,
+            pool_snapshot_reader=lambda: latest,
+        )
 
-        minimum = actions._minimum(desired)
+        with self.assertRaisesRegex(
+            ActionError, "价格已离开目标区间.*等待下一轮"
+        ):
+            actions.enter(MINT_REGRESSION_SAMPLE, MINT_REGRESSION_BAND)
 
-        self.assertEqual(minimum, desired * 9_970 // 10_000)
+        self.assertNotIn(
+            "0x88316456",
+            [intent.calldata[:10] for intent in dependencies.executor.intents],
+        )
+        self.assertFalse(any(name == "mint" for name, _args, _kwargs in position.calls))
 
     def test_mint_outside_range_allows_zero_desired_and_minimum_leg(self):
         sample = sample_at_tick(BAND.tick_lower - 10)
-        actions, dependencies = make_actions(fact_limit=100)
+        actions, _dependencies = make_actions(fact_limit=100)
 
-        actions.enter(sample, BAND)
+        mint = actions._mint_params(
+            10**18, 100_000_000, BAND, sample.sqrt_price_x96
+        )
 
-        mint = decode_mint(dependencies.executor.intents[-1])
-        self.assertGreater(mint[5], 0)
-        self.assertEqual(mint[6], 0)
-        self.assertGreater(mint[7], 0)
-        self.assertEqual(mint[8], 0)
+        self.assertGreater(mint[0], 0)
+        self.assertEqual(mint[1], 0)
+        self.assertEqual(mint[2:], (0, 0))
 
     def test_zero_available_capital_fails_before_constructing_any_intent(self):
         approval = FakeApprovalManager()
@@ -471,7 +627,7 @@ class ProductionEnterTest(unittest.TestCase):
             ),
         )
 
-    def test_mint_uses_nonzero_minimums_deadline_owner_and_exact_band(self):
+    def test_mint_uses_zero_minimums_deadline_owner_and_exact_band(self):
         actions, dependencies = make_actions()
         in_range_sample = sample_at_tick(
             (BAND.tick_lower + BAND.tick_upper) // 2
@@ -481,16 +637,9 @@ class ProductionEnterTest(unittest.TestCase):
 
         values = decode_mint(dependencies.executor.intents[-1])
         self.assertEqual(values[3:5], (BAND.tick_lower, BAND.tick_upper))
-        self.assertGreater(values[7], 0)
-        self.assertGreater(values[8], 0)
+        self.assertEqual(values[7:9], (0, 0))
         self.assertEqual(values[9].lower(), OWNER)
         self.assertEqual(values[10], 2_000_000_300)
-        self.assertEqual(
-            values[7], values[5] * (10_000 - 30) // 10_000
-        )
-        self.assertEqual(
-            values[8], values[6] * (10_000 - 30) // 10_000
-        )
 
     def test_invalid_broadcast_types_fail_before_any_dependency_call(self):
         for invalid in (1, "true", object()):
@@ -642,7 +791,8 @@ class ProductionRebalanceActionsTest(unittest.TestCase):
     def test_read_balances_caps_incident_wallet_to_fifty_dollars(self):
         portfolio = self._incident_portfolio()
         actions, _dependencies = make_actions(
-            reader=SequenceReader(portfolio), fact_limit=50
+            reader=SequenceReader(portfolio), fact_limit=50,
+            pool_snapshot_reader=lambda: INCIDENT_SAMPLE,
         )
 
         balances = actions.rebalance_actions(
@@ -674,10 +824,11 @@ class ProductionRebalanceActionsTest(unittest.TestCase):
         self.assertIsNotNone(precise)
         self.assertLess(precise.amount_usd, Decimal("1"))
 
-    def test_rebalance_mint_uses_band_ratio_and_desired_minimums(self):
+    def test_rebalance_mint_uses_band_ratio_and_zero_minimums(self):
         portfolio = self._incident_portfolio()
         actions, _dependencies = make_actions(
-            reader=SequenceReader(portfolio), fact_limit=50
+            reader=SequenceReader(portfolio), fact_limit=50,
+            pool_snapshot_reader=lambda: INCIDENT_SAMPLE,
         )
 
         mint = decode_mint(
@@ -701,20 +852,76 @@ class ProductionRebalanceActionsTest(unittest.TestCase):
             INCIDENT_SAMPLE.sqrt_price_x96,
         )
         self.assertEqual(mint[5:7], expected)
-        self.assertEqual(
-            mint[7:9], tuple(expected_minimum(value) for value in expected)
+        self.assertEqual(mint[7:9], (0, 0))
+
+    def test_rebalance_mint_uses_fresh_pool_snapshot_price(self):
+        portfolio = self._incident_portfolio()
+        latest = MarketSample(
+            Decimal("1760"), price_to_tick(Decimal("1760"), 18, 6),
+            price_to_sqrt_price_x96(Decimal("1760"), 18, 6),
         )
+        actions, _dependencies = make_actions(
+            reader=SequenceReader(portfolio), fact_limit=50,
+            pool_snapshot_reader=lambda: latest,
+        )
+
+        mint = decode_mint(
+            actions.rebalance_actions(
+                INCIDENT_SAMPLE, INCIDENT_BAND
+            ).mint("7" * 32)
+        )
+
+        budget0, budget1 = actions._capital_budget(portfolio, latest.price)
+        expected = mint_amounts_for_budget(
+            budget0, budget1,
+            INCIDENT_BAND.tick_lower, INCIDENT_BAND.tick_upper,
+            latest.sqrt_price_x96,
+        )
+        initial_expected = mint_amounts_for_budget(
+            budget0, budget1,
+            INCIDENT_BAND.tick_lower, INCIDENT_BAND.tick_upper,
+            INCIDENT_SAMPLE.sqrt_price_x96,
+        )
+        self.assertEqual(mint[5:7], expected)
+        self.assertNotEqual(mint[5:7], initial_expected)
+
+    def test_rebalance_rejects_fresh_price_outside_band_without_mint(self):
+        latest = MarketSample(
+            Decimal("1770"), price_to_tick(Decimal("1770"), 18, 6),
+            price_to_sqrt_price_x96(Decimal("1770"), 18, 6),
+        )
+        position_manager = CountingPositionManager()
+        actions, _dependencies = make_actions(
+            reader=SequenceReader(self._incident_portfolio()),
+            position_manager=position_manager, fact_limit=50,
+            pool_snapshot_reader=lambda: latest,
+        )
+        callbacks = actions.rebalance_actions(
+            INCIDENT_SAMPLE, INCIDENT_BAND
+        )
+
+        with self.assertRaisesRegex(
+            ActionError, "价格已离开目标区间.*等待下一轮"
+        ):
+            callbacks.mint("8" * 32)
+
+        self.assertFalse(any(
+            name == "mint" for name, _args, _kwargs
+            in position_manager.calls
+        ))
 
     def test_enter_and_rebalance_build_identical_mint_params(self):
         portfolio = self._incident_portfolio(with_position=False)
         enter_actions, enter_dependencies = make_actions(
-            reader=SequenceReader(portfolio), fact_limit=50
+            reader=SequenceReader(portfolio), fact_limit=50,
+            pool_snapshot_reader=lambda: INCIDENT_SAMPLE,
         )
         rebalance_actions, _dependencies = make_actions(
             reader=SequenceReader(
                 replace(portfolio, positions=(owned_position(),))
             ),
             fact_limit=50,
+            pool_snapshot_reader=lambda: INCIDENT_SAMPLE,
         )
 
         enter_actions.enter(INCIDENT_SAMPLE, INCIDENT_BAND)
@@ -761,7 +968,8 @@ class ProductionRebalanceActionsTest(unittest.TestCase):
         )
         reader = SequenceReader(before_swap, before_swap)
         actions, _dependencies = make_actions(
-            reader=reader, fact_limit=50
+            reader=reader, fact_limit=50,
+            pool_snapshot_reader=lambda: INCIDENT_SAMPLE,
         )
         callbacks = actions.rebalance_actions(
             INCIDENT_SAMPLE, INCIDENT_BAND
@@ -797,9 +1005,7 @@ class ProductionRebalanceActionsTest(unittest.TestCase):
         )
         self.assertNotEqual(expected, (0, 0))
         self.assertEqual(mint[5:7], expected)
-        self.assertEqual(
-            mint[7:9], tuple(expected_minimum(value) for value in expected)
-        )
+        self.assertEqual(mint[7:9], (0, 0))
 
     def test_below_range_decrease_allows_zero_token1_minimum(self):
         position = owned_position(liquidity=21_126_254_269_852)

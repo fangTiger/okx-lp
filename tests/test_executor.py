@@ -79,11 +79,15 @@ class RecordingCalldataPolicy:
 
 
 class RecordingRpc:
-    def __init__(self, events, *, revert=None, receipt=None, returned_hash=None):
+    def __init__(
+        self, events, *, revert=None, receipt=None, returned_hash=None,
+        call_result="0x",
+    ):
         self.events = events
         self.revert = revert
         self.receipt = receipt or {"status": "0x1"}
         self.returned_hash = returned_hash
+        self.call_result = call_result
         self.broadcasts = []
 
     def call(self, method, _params):
@@ -91,7 +95,7 @@ class RecordingRpc:
         if method == "eth_call":
             if self.revert:
                 raise RpcError(f"execution reverted: {self.revert}")
-            return "0x"
+            return self.call_result
         if method == "eth_getTransactionReceipt":
             return self.receipt
         raise AssertionError(f"未预期 RPC：{method}")
@@ -335,6 +339,44 @@ class TransactionExecutorTest(unittest.TestCase):
         self.assertEqual(self.signer.calls, 0)
         self.assertEqual(self.rpc.broadcasts, [])
 
+    def test_simulation_check_failure_is_persisted_without_sign_or_broadcast(self):
+        self.rpc.call_result = "0x" + encode(
+            ["uint256", "uint128", "uint256", "uint256"],
+            [15_857, 123, 10, 20],
+        ).hex()
+        intent = Intent.create(TARGET, "0x88316456")
+        checked = []
+
+        def reject(result):
+            checked.append(result)
+            raise RuntimeError("存入价值低于阈值")
+
+        with self.assertRaisesRegex(ExecutionError, "存入价值低于阈值"):
+            self._executor().execute(
+                intent, allow_broadcast=True, simulation_check=reject
+            )
+
+        stored = self.store.load(intent.intent_id)
+        self.assertEqual(checked, [self.rpc.call_result])
+        self.assertEqual(stored.status, IntentStatus.FAILED)
+        self.assertIn("存入价值低于阈值", stored.error)
+        self.assertEqual(self.signer.calls, 0)
+        self.assertEqual(self.rpc.broadcasts, [])
+        self.assertNotIn("gas", self.events)
+
+    def test_execute_without_simulation_check_keeps_existing_behavior(self):
+        intent = Intent.create(TARGET, "0x88316456")
+
+        result = self._executor().execute(intent)
+
+        self.assertEqual(result.intent.status, IntentStatus.DRY_RUN)
+        self.assertEqual(self.signer.calls, 1)
+        self.assertEqual(self.rpc.broadcasts, [])
+        self.assertEqual(
+            self.events,
+            ["白名单", "参数策略", "eth_call", "gas", "nonce", "签名"],
+        )
+
     def test_default_dry_run_signs_prints_full_tx_and_never_broadcasts(self):
         intent = Intent.create(TARGET, "0x88316456" + "00" * 32, value=9)
 
@@ -542,6 +584,28 @@ class TransactionExecutorTest(unittest.TestCase):
         self.assertEqual(self.store.load(intent.intent_id).status, IntentStatus.FAILED)
         self.assertEqual(self.signer.calls, 0)
         self.assertEqual(self.rpc.broadcasts, [])
+
+    def test_signed_recovery_simulation_check_failure_stops_before_signing(self):
+        intent = Intent.create(TARGET, "0x88316456")
+        self._signed(intent)
+        self.events.clear()
+        self.rpc.call_result = "0x" + encode(
+            ["uint256", "uint128", "uint256", "uint256"],
+            [15_857, 123, 10, 20],
+        ).hex()
+
+        def reject(_result):
+            raise RuntimeError("恢复时存入价值不足")
+
+        with self.assertRaisesRegex(ExecutionError, "恢复时存入价值不足"):
+            self._executor().execute(
+                intent, allow_broadcast=True, simulation_check=reject
+            )
+
+        self.assertEqual(self.store.load(intent.intent_id).status, IntentStatus.FAILED)
+        self.assertEqual(self.signer.calls, 0)
+        self.assertEqual(self.rpc.broadcasts, [])
+        self.assertNotIn("签名", self.events)
 
     def test_signed_transaction_rejects_non_integer_numeric_field(self):
         intent = Intent.create(TARGET, "0x88316456")

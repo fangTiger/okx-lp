@@ -325,6 +325,9 @@ class LiveBootstrap:
             ),
             owner=self.result.snapshot.owner, pool=self.pool,
             fact_gate=self.fact_gate, swap_policy=swap_policy,
+            pool_snapshot_reader=lambda: _sample_at_block(
+                self.rpc, self.pool, self.rpc.block_number()
+            ),
         )
         state_store = MachineStateStore(
             Path("log") / f"machine_state_{self.pool.pool_id}.json"

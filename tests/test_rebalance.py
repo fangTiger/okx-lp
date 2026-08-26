@@ -2,6 +2,7 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -44,9 +45,13 @@ class RecordingExecutor:
         self.fail_at = fail_at
         self.rpc_methods = []
 
-    def execute(self, current, *, allow_broadcast=False):
+    def execute(
+        self, current, *, allow_broadcast=False, simulation_check=None,
+    ):
         label = current.transaction["label"]
         self.events.append(f"execute_{label}:{allow_broadcast}")
+        if simulation_check is not None:
+            simulation_check("0x")
         if allow_broadcast:
             self.rpc_methods.append("eth_sendRawTransaction")
         if label == self.fail_at:
@@ -147,6 +152,26 @@ class RebalanceTest(unittest.TestCase):
         )
         self.assertEqual(progress.completed, ("burn", "collect", "swap", "mint"))
         self.assertIsNone(progress.failed_stage)
+
+    def test_mint_stage_passes_its_simulation_check_to_executor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events = []
+            actions = replace(
+                self._actions(events),
+                mint_simulation_check=lambda result: events.append(
+                    f"check_mint:{result}"
+                ),
+            )
+            orchestrator = RebalanceOrchestrator(
+                executor=RecordingExecutor(events),
+                journal=RebalanceJournal(Path(directory)),
+                sleep=lambda _seconds: None,
+            )
+
+            orchestrator.execute(actions, rebalance_id="mint-check")
+
+        self.assertIn("check_mint:0x", events)
+        self.assertEqual(events[-2:], ["execute_mint:False", "check_mint:0x"])
 
     def test_failure_stops_before_mint_and_persists_completed_stage(self):
         with tempfile.TemporaryDirectory() as directory:

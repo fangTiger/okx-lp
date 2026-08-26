@@ -73,7 +73,8 @@ class TransactionExecutor:
         self.clock = clock
 
     def execute(
-        self, intent: Intent, *, allow_broadcast: bool = False
+        self, intent: Intent, *, allow_broadcast: bool = False,
+        simulation_check: Callable[[str], None] | None = None,
     ) -> ExecutionResult:
         """执行安全流水线；只有显式授权时才调用广播函数。"""
         broadcast = require_broadcast_flag(allow_broadcast)
@@ -91,11 +92,14 @@ class TransactionExecutor:
         if current.status == IntentStatus.SENT:
             return self._resume_sent(current)
         if current.status == IntentStatus.SIGNED:
-            return self._resume_signed(current, broadcast)
+            return self._resume_signed(
+                current, broadcast, simulation_check
+            )
 
         current = self._simulate(
             intent, current,
             persist_success=current.status is IntentStatus.PERSISTED,
+            simulation_check=simulation_check,
         )
         rpc_transaction = self._rpc_transaction(intent)
 
@@ -198,12 +202,17 @@ class TransactionExecutor:
         }
 
     def _simulate(
-        self, intent: Intent, current: Intent, *, persist_success: bool
+        self, intent: Intent, current: Intent, *, persist_success: bool,
+        simulation_check: Callable[[str], None] | None = None,
     ) -> Intent:
         rpc_transaction = self._rpc_transaction(intent)
         LOGGER.info("Intent %s 开始 eth_call 模拟", intent.intent_id)
         try:
-            self.rpc.call("eth_call", [rpc_transaction, "pending"])
+            raw_result = self.rpc.call(
+                "eth_call", [rpc_transaction, "pending"]
+            )
+            if simulation_check is not None:
+                simulation_check(raw_result)
         except Exception as error:
             reason = str(error) or error.__class__.__name__
             self.store.save(
@@ -252,13 +261,17 @@ class TransactionExecutor:
         return self._wait_for_receipt(sent)
 
     def _resume_signed(
-        self, intent: Intent, allow_broadcast: bool
+        self, intent: Intent, allow_broadcast: bool,
+        simulation_check: Callable[[str], None] | None = None,
     ) -> ExecutionResult:
         """对 SIGNED 记录重新授权、核对并模拟后再进入签名边界。"""
         LOGGER.info("Intent %s 从已签名状态恢复，重新执行全部安全校验", intent.intent_id)
         self._validate_intent(intent)
         self._assert_transaction_matches_intent(intent)
-        self._simulate(intent, intent, persist_success=False)
+        self._simulate(
+            intent, intent, persist_success=False,
+            simulation_check=simulation_check,
+        )
         return self._finish_signed(intent, allow_broadcast)
 
     def _assert_transaction_matches_intent(self, intent: Intent) -> dict[str, Any]:

@@ -75,6 +75,13 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(set(outrange), {"confirm_seconds", "pin_timeout"})
         self.assertEqual(Decimal(str(data["swap"]["min_amount_usd"])), Decimal("1"))
 
+    def test_example_risk_config_documents_mint_deposit_floor(self):
+        data = yaml.safe_load(
+            Path("config/risk.example.yaml").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(data["limits"]["mint_min_deposit_bps"], 5000)
+
     def test_missing_field_reports_full_chinese_path(self):
         content = VALID_CONFIG.replace("      decimals: 18\n", "", 1)
 

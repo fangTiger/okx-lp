@@ -44,10 +44,16 @@ class CalldataPolicyTest(unittest.TestCase):
             max_approval_raw=MAX_APPROVALS,
         )
 
-    def mint(self, *, token0=TOKEN0, token1=TOKEN1, recipient=EXECUTOR,
-             fee=500, deadline=NOW + 600):
-        values = (token0, token1, fee, -201600, -201500, 10, 20, 9, 18,
-                  recipient, deadline)
+    def mint(
+        self, *, token0=TOKEN0, token1=TOKEN1, recipient=EXECUTOR,
+        fee=500, deadline=NOW + 600, amount0_desired=10,
+        amount1_desired=20, amount0_min=9, amount1_min=18,
+    ):
+        values = (
+            token0, token1, fee, -201600, -201500,
+            amount0_desired, amount1_desired, amount0_min, amount1_min,
+            recipient, deadline,
+        )
         return calldata("0x88316456", MINT_TYPE, values)
 
     def decrease(
@@ -194,6 +200,31 @@ class CalldataPolicyTest(unittest.TestCase):
             calldata=self.decrease(amount0_min=0, amount1_min=1),
             value=0,
             now_ts=NOW,
+        )
+
+    def test_mint_allows_two_zero_minimums_when_desired_is_nonzero(self):
+        self.policy.validate(
+            target=NPM,
+            calldata=self.mint(amount0_min=0, amount1_min=0),
+            value=0,
+            now_ts=NOW,
+        )
+
+    def test_mint_rejects_two_zero_desired_amounts(self):
+        self.assert_rejected(
+            NPM,
+            self.mint(
+                amount0_desired=0, amount1_desired=0,
+                amount0_min=0, amount1_min=0,
+            ),
+            message="amount0Desired.*amount1Desired",
+        )
+
+    def test_swap_still_rejects_zero_amount_out_minimum(self):
+        self.assert_rejected(
+            ROUTER,
+            self.swap(amount_out_minimum=0),
+            message="amountOutMinimum",
         )
 
     def test_swap_parameter_attacks_are_rejected_individually(self):

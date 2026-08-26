@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from eth_abi import decode
 
 from okxlp.config_validation import address as validate_address
 from okxlp.exec.authorization import require_broadcast_flag
@@ -24,6 +25,7 @@ from okxlp.uniswap.tickmath import mint_amounts_for_budget, position_amounts
 LOGGER = logging.getLogger(__name__)
 BPS = Decimal("10000")
 RISK_PATH = Path("config/risk.yaml")
+DEFAULT_MINT_MIN_DEPOSIT_BPS = 5_000
 
 
 class ActionError(RuntimeError):
@@ -36,6 +38,7 @@ class ProductionActions:
     def __init__(
         self, *, executor, reader, approval_manager, position_manager,
         swap_router, owner: str, pool, fact_gate, swap_policy,
+        pool_snapshot_reader: Callable[[], Any],
         deadline_seconds: int = 300,
         clock: Callable[[], int] = lambda: int(time.time()),
         dust_threshold_raw: int = 10**12,
@@ -44,6 +47,8 @@ class ProductionActions:
             raise ValueError("deadline_seconds 必须是正整数")
         if type(dust_threshold_raw) is not int or dust_threshold_raw < 0:
             raise ValueError("dust_threshold_raw 必须是非负整数")
+        if not callable(pool_snapshot_reader):
+            raise ValueError("pool_snapshot_reader 必须是可调用的池快照读取器")
         self.executor = executor
         self.reader = reader
         self.approval_manager = approval_manager
@@ -56,6 +61,8 @@ class ProductionActions:
         self.deadline_seconds = deadline_seconds
         self.clock = clock
         self.dust_threshold_raw = dust_threshold_raw
+        self.pool_snapshot_reader = pool_snapshot_reader
+        self.mint_min_deposit_bps = _mint_min_deposit_bps()
         self.token0 = pool.token0
         self.token1 = pool.token1
         stable = tuple(
@@ -93,20 +100,6 @@ class ProductionActions:
         if self.asset is self.token0:
             return asset_amount, usdc_amount
         return usdc_amount, asset_amount
-
-    def _minimum(self, desired: int) -> int:
-        if desired == 0:
-            return 0
-        slippage_numerator, slippage_denominator = (
-            self.swap_policy.max_slippage_bps.as_integer_ratio()
-        )
-        minimum = (
-            desired * (10_000 * slippage_denominator - slippage_numerator)
-            // (10_000 * slippage_denominator)
-        )
-        if minimum <= 0:
-            raise ActionError("mint 最低数量为 0，拒绝无保护建仓")
-        return minimum
 
     def _capital_budget(
         self, portfolio, price: Decimal, *,
@@ -156,7 +149,7 @@ class ProductionActions:
     def _mint_params(
         self, budget0: int, budget1: int, band, sqrt_price_x96: int,
     ) -> tuple[int, int, int, int]:
-        """返回按区间配比后的 desired 与基于 desired 的滑点下限。"""
+        """返回按区间配比后的 desired 与固定双零 minimum。"""
         amount0_desired, amount1_desired = mint_amounts_for_budget(
             budget0,
             budget1,
@@ -164,12 +157,82 @@ class ProductionActions:
             band.tick_upper,
             sqrt_price_x96,
         )
+        # 真实窄区间 [-201710,-201600] 实测表明：为容纳 ±0.4%
+        # 价格移动，per-leg 容差需达 9182 bps，已等同无保护；
+        # 但存入价值占预算仍稳定在 52.8%–97.8%。mint 的 min 是比例
+        # 约束而非防洗劫，窄区间下比例随价格剧烈摆动是数学必然；
+        # 真正的保护见 simulation_check 对模拟实际存入总价值的校验。
         return (
             amount0_desired,
             amount1_desired,
-            self._minimum(amount0_desired),
-            self._minimum(amount1_desired),
+            0,
+            0,
         )
+
+    def _latest_mint_sample(self, band):
+        """在 mint 构造前取最新池价，价格出 band 则失败关闭。"""
+        try:
+            latest = self.pool_snapshot_reader()
+        except Exception as error:
+            reason = str(error) or error.__class__.__name__
+            raise ActionError(f"读取最新池快照失败：{reason}") from error
+        price = getattr(latest, "price", None)
+        sqrt_price_x96 = getattr(latest, "sqrt_price_x96", None)
+        if (
+            not isinstance(price, Decimal)
+            or not price.is_finite()
+            or price <= 0
+            or type(sqrt_price_x96) is not int
+            or sqrt_price_x96 <= 0
+        ):
+            raise ActionError("最新池快照缺少有效 price 或 sqrt_price_x96")
+        if not band.price_lower <= price <= band.price_upper:
+            raise ActionError(
+                "最新价格已离开目标区间："
+                f"当前={price}，目标="
+                f"[{band.price_lower}, {band.price_upper}]，"
+                "本轮放弃建仓，等待下一轮重新计算区间"
+            )
+        return latest
+
+    def _mint_simulation_check(
+        self, budget0: int, budget1: int, price: Decimal,
+    ) -> Callable[[str], None]:
+        """按 mint 模拟返回的两腿实际数量检查存入总价值。"""
+        budget_usd = (
+            Decimal(budget0) / (Decimal(10) ** self.token0.decimals) * price
+            + Decimal(budget1) / (Decimal(10) ** self.token1.decimals)
+        )
+        minimum_usd = (
+            budget_usd * Decimal(self.mint_min_deposit_bps) / BPS
+        )
+
+        def check(raw_result: str) -> None:
+            try:
+                if type(raw_result) is not str or not raw_result.startswith("0x"):
+                    raise ValueError("不是 hex 字符串")
+                payload = bytes.fromhex(raw_result[2:])
+                if len(payload) != 128:
+                    raise ValueError(f"期望 128 字节，实际 {len(payload)} 字节")
+                _token_id, _liquidity, amount0, amount1 = decode(
+                    ["uint256", "uint128", "uint256", "uint256"],
+                    payload,
+                    strict=True,
+                )
+            except Exception as error:
+                raise ActionError(f"mint 模拟返回值无法按 ABI 解码：{error}") from error
+            deposited_usd = (
+                Decimal(amount0) / (Decimal(10) ** self.token0.decimals) * price
+                + Decimal(amount1) / (Decimal(10) ** self.token1.decimals)
+            )
+            if deposited_usd < minimum_usd:
+                raise ActionError(
+                    f"mint 模拟实际存入 {deposited_usd} USD，"
+                    f"预算 {budget_usd} USD，低于阈值 "
+                    f"{self.mint_min_deposit_bps} bps（{minimum_usd} USD）"
+                )
+
+        return check
 
     def _decrease_minimums(self, position, sample) -> tuple[int, int]:
         """按决策轮同区块池价计算 decreaseLiquidity 两腿下限。"""
@@ -199,11 +262,20 @@ class ProductionActions:
             )
         return minimums
 
-    def _execute(self, intent: Intent, stage: str, broadcast: bool) -> None:
+    def _execute(
+        self, intent: Intent, stage: str, broadcast: bool,
+        simulation_check: Callable[[str], None] | None = None,
+    ) -> None:
         try:
-            result = self.executor.execute(
-                intent, allow_broadcast=broadcast
-            )
+            if simulation_check is None:
+                result = self.executor.execute(
+                    intent, allow_broadcast=broadcast
+                )
+            else:
+                result = self.executor.execute(
+                    intent, allow_broadcast=broadcast,
+                    simulation_check=simulation_check,
+                )
         except Exception as error:
             reason = str(error) or error.__class__.__name__
             raise ActionError(f"{stage} 阶段执行失败：{reason}") from error
@@ -313,12 +385,14 @@ class ProductionActions:
         try:
             if broadcast:
                 current = self.reader.read(self.owner, spenders=self._spenders)
+                latest = self._latest_mint_sample(band)
                 budget0, budget1 = self._capital_budget(
                     current,
-                    sample.price,
+                    latest.price,
                     capital_limit_usd=capital_limit_usd,
                 )
             else:
+                latest = self._latest_mint_sample(band)
                 budget0, budget1 = self._ordered_amounts(
                     estimated_asset, estimated_usdc
                 )
@@ -330,7 +404,10 @@ class ProductionActions:
                 amount1_min,
             ) = self._mint_params(
                 budget0, budget1, band,
-                sample.sqrt_price_x96,
+                latest.sqrt_price_x96,
+            )
+            simulation_check = self._mint_simulation_check(
+                budget0, budget1, latest.price
             )
             mint = self.position_manager.mint(
                 token0=self.token0.address,
@@ -350,7 +427,10 @@ class ProductionActions:
         except Exception as error:
             reason = str(error) or error.__class__.__name__
             raise ActionError(f"enter mint Intent 构造失败：{reason}") from error
-        self._execute(mint, "mint", broadcast)
+        self._execute(
+            mint, "mint", broadcast,
+            simulation_check=simulation_check,
+        )
 
     def rebalance_actions(self, sample, band) -> RebalanceActions:
         """返回沿用 burn 阶段名的 decrease、collect、swap、mint 回调。"""
@@ -361,6 +441,7 @@ class ProductionActions:
         before_swap = None
         planned_requirement = None
         planned_swaps = ()
+        mint_check: Callable[[str], None] | None = None
 
         def burn(intent_id: str) -> Intent:
             return self.position_manager.decrease_liquidity(
@@ -416,10 +497,12 @@ class ProductionActions:
             return planned_swaps
 
         def mint(intent_id: str) -> Intent:
+            nonlocal mint_check
             current = self.reader.read(self.owner, spenders=self._spenders)
+            latest = self._latest_mint_sample(band)
             if selected_balances is None:
                 budget0, budget1 = self._capital_budget(
-                    current, sample.price
+                    current, latest.price
                 )
             else:
                 budget0 = selected_balances.amount0_raw
@@ -454,7 +537,10 @@ class ProductionActions:
                 amount0_min,
                 amount1_min,
             ) = self._mint_params(
-                budget0, budget1, band, sample.sqrt_price_x96
+                budget0, budget1, band, latest.sqrt_price_x96
+            )
+            mint_check = self._mint_simulation_check(
+                budget0, budget1, latest.price
             )
             return self.position_manager.mint(
                 token0=self.token0.address,
@@ -471,12 +557,18 @@ class ProductionActions:
                 intent_id=intent_id,
             )
 
+        def check_mint_simulation(raw_result: str) -> None:
+            if mint_check is None:
+                raise ActionError("mint Intent 尚未构造，拒绝检查模拟结果")
+            mint_check(raw_result)
+
         return RebalanceActions(
             burn=burn,
             collect=collect,
             read_balances=read_balances,
             build_swap=build_swap,
             mint=mint,
+            mint_simulation_check=check_mint_simulation,
         )
 
     def exit(self, sample, *, allow_broadcast: bool = False) -> None:
@@ -573,3 +665,20 @@ def _capital_limits(path: Path = RISK_PATH) -> tuple[Decimal, Decimal]:
     if any(not value.is_finite() or value < 0 for value in values):
         raise ActionError("本金风控配置必须是有限非负数")
     return values
+
+
+def _mint_min_deposit_bps(path: Path = RISK_PATH) -> int:
+    """读取 mint 模拟存入价值下限，缺省键使用 5000 bps。"""
+    try:
+        root = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if type(root) is not dict or type(root.get("limits")) is not dict:
+            raise TypeError("根节点与 limits 必须是映射")
+        limits = root["limits"]
+        value = limits.get(
+            "mint_min_deposit_bps", DEFAULT_MINT_MIN_DEPOSIT_BPS
+        )
+    except (OSError, KeyError, TypeError, yaml.YAMLError) as error:
+        raise ActionError(f"无法读取 mint 风控配置 {path}：{error}") from error
+    if type(value) is not int or not 0 <= value <= 10_000:
+        raise ActionError("limits.mint_min_deposit_bps 必须是 0..10000 的整数")
+    return value

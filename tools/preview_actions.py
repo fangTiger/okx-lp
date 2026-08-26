@@ -57,7 +57,10 @@ class PreviewExecutor:
         self.transaction_count = 0
         self.total_gas = 0
 
-    def execute(self, intent, *, allow_broadcast: bool = False):
+    def execute(
+        self, intent, *, allow_broadcast: bool = False,
+        simulation_check=None,
+    ):
         """仅把 Intent 渲染为 dry-run 交易。"""
         broadcast = require_broadcast_flag(allow_broadcast)
         if broadcast:
@@ -266,6 +269,9 @@ def main(argv: list[str] | None = None) -> None:
         pool=pool,
         fact_gate=load_fact_gate(),
         swap_policy=swap_policy,
+        pool_snapshot_reader=lambda: _sample_at_block(
+            rpc, pool, rpc.block_number()
+        ),
     )
     band = build_price_band(
         sample.price,

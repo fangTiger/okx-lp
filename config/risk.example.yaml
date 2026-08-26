@@ -13,6 +13,9 @@ limits:
   max_tx_value_usd: 20000
   max_rebalances_per_day: 30     # 单池每日最多再平衡 30 次
   max_slippage_bps: 30
+  mint_min_deposit_bps: 5000   # mint 模拟结果中，实际存入价值相对本轮预算的下限。
+                               # 取代 per-leg minimum：后者在窄区间下需 >9000bps 容差
+                               # 才能容纳 ±0.4% 价格移动，等同无保护。
 
 swap:
   min_amount_usd: 1                 # 低于 1 USD 的 50/50 差额视为粉尘

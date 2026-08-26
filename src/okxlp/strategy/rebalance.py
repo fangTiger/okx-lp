@@ -53,6 +53,7 @@ class RebalanceActions:
         [SwapRequirement, tuple[str, ...]], tuple[ScheduledSwap, ...]
     ]
     mint: Callable[[str], Intent]
+    mint_simulation_check: Callable[[str], None] | None = None
 @dataclass(frozen=True)
 class RebalanceProgress:
     """可原子持久化的再平衡进度。"""
@@ -225,7 +226,8 @@ class RebalanceOrchestrator:
                 mint = actions.mint(intent_id)
                 self._ensure_intent_id(mint, intent_id)
                 progress = self._run_stage(
-                    progress, stage, ((mint, 0),), broadcast
+                    progress, stage, ((mint, 0),), broadcast,
+                    simulation_check=actions.mint_simulation_check,
                 )
             return progress
         except BaseException as error:
@@ -254,6 +256,7 @@ class RebalanceOrchestrator:
     def _run_stage(
         self, progress: RebalanceProgress, stage: str,
         scheduled: tuple[tuple[Intent, int], ...], allow_broadcast: bool,
+        simulation_check: Callable[[str], None] | None = None,
     ) -> RebalanceProgress:
         broadcast = require_broadcast_flag(allow_broadcast)
         ids = []
@@ -261,7 +264,15 @@ class RebalanceOrchestrator:
         for intent, delay in scheduled:
             if delay:
                 self.sleep(delay)
-            result = self.executor.execute(intent, allow_broadcast=broadcast)
+            if simulation_check is None:
+                result = self.executor.execute(
+                    intent, allow_broadcast=broadcast
+                )
+            else:
+                result = self.executor.execute(
+                    intent, allow_broadcast=broadcast,
+                    simulation_check=simulation_check,
+                )
             if result.intent.status != expected:
                 raise RebalanceError(
                     f"Intent {intent.intent_id} 状态为 {result.intent.status.value}，期望 {expected.value}"

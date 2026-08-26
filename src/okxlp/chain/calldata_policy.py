@@ -335,6 +335,12 @@ class CalldataPolicy:
                 raise CalldataPolicyError(
                     f"{name} 不合规：期望非负整数，实际值={amount}"
                 )
+        if amount0_desired + amount1_desired <= 0:
+            raise CalldataPolicyError(
+                "amount0Desired 与 amount1Desired 不得同时为 0"
+            )
+        # mint minimum 是存入比例约束，窄区间价格小幅变动就会使
+        # 两腿比例剧烈摆动；因此允许双零，价值保护由 mint 模拟结果完成。
 
     def _validate_decrease(self, values: tuple[Any, ...], now_ts: int) -> None:
         token_id, liquidity, amount0_min, amount1_min, deadline = values
