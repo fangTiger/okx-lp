@@ -7,7 +7,7 @@ outrange:
   pin_timeout: 600            # 持续界外确认上限保护
 
 limits:
-  total_capital_usd: 50       # 首笔测试仓，遵循定稿 D12「首笔 < $50」
+  total_capital_usd: 350      # 用户授权投入全部 USDG 余额（钱包 352.32 USDG）
   max_pool_share: 0.40
   probe_capital_usd: 2000
   max_tx_value_usd: 20000

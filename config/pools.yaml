@@ -12,7 +12,7 @@ chain:
 
 pools:
   - id: wASMLx_USDC
-    enabled: true                  # F1 已从官方渠道确认
+    enabled: false                 # 2026-08-27 停用：不在活动合格池清单内，仅赚手续费
     uniswap_version: v3
     address: "0xc3d659028117f1ae5db9b9c68239b4a71f03ef37"
     factory: "0x4b2ab38dbf28d31d467aa8993f6c2585981d6804"
