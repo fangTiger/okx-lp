@@ -126,3 +126,57 @@
 #### Scenario: 校准前的仓位限制
 - **WHEN** 规则校准尚未完成
 - **THEN** 风控闸门将总投入限制在探针仓上限内
+
+### Requirement: 同区块账户快照
+系统 MUST 在确认 chainId 后读取一次区块高度，并将该高度的十六进制值传给本次账户快照中的每一次 `eth_call`。
+
+#### Scenario: 所有账户读取固定在一个区块
+- **WHEN** 系统读取指定 owner 的头寸、两腿余额和授权额度
+- **THEN** 所有 `eth_call` 使用同一个已确定区块参数
+
+### Requirement: 枚举并过滤本池 NPM 头寸
+系统 MUST 枚举 owner 持有的全部 NPM tokenId，并且仅当 token0、token1 的顺序及 fee 均与目标池一致时才把头寸加入快照。
+
+#### Scenario: 地址持有多个池的头寸
+- **WHEN** owner 同时持有目标池头寸、不同 fee 头寸和不同币对头寸
+- **THEN** 快照仅包含目标池头寸，并把其余头寸计入 `other_pool_position_count`
+
+#### Scenario: 目标池头寸流动性为零
+- **WHEN** 目标池头寸的 liquidity 等于零
+- **THEN** 系统仍保留该头寸及 tokenId
+
+### Requirement: 正确解码 NPM positions
+系统 MUST 按 12 个 ABI 字的固定顺序解析 `positions(uint256)`，并把符号扩展存储的 tickLower 与 tickUpper 按 256 位有符号整数解码。
+
+#### Scenario: 负数 tick 边界
+- **WHEN** `positions` 返回符号扩展的负 tickLower 和 tickUpper
+- **THEN** 快照中的两个 tick 均为正确负数
+
+#### Scenario: 不暴露陈旧手续费字段
+- **WHEN** 系统构造账户快照
+- **THEN** 快照不暴露 feeGrowthInsideLast 或 tokensOwed 字段
+
+### Requirement: 头寸数量失败关闭
+系统 MUST 在 NPM `balanceOf(owner)` 超过 50 时以中文错误拒绝继续枚举。
+
+#### Scenario: 地址持有过多 NPM NFT
+- **WHEN** `balanceOf(owner)` 返回 51
+- **THEN** 系统抛错且不读取任何 tokenId
+
+#### Scenario: 地址没有 NPM NFT
+- **WHEN** `balanceOf(owner)` 返回零
+- **THEN** 系统返回空头寸元组和空 tokenId 集合
+
+### Requirement: 读取两腿余额和授权额度
+系统 MUST 读取 owner 的两腿 ERC20 原始余额，并读取两腿代币与每个指定 spender 的笛卡尔积授权额度。
+
+#### Scenario: 授权额度边界
+- **WHEN** 已记录授权额度恰好等于需要额度
+- **THEN** `has_sufficient_allowance` 返回真；需要额度多一时返回假
+
+### Requirement: 只读验收工具
+系统 MUST 提供要求 `--owner` 参数的只读 CLI，输出区块、owner、本池头寸区间与流动性、是否处于区间内、两腿余额及 NPM 和 SwapRouter02 授权额度。
+
+#### Scenario: 运行账户读取工具
+- **WHEN** 操作者提供合法 owner 地址运行 CLI
+- **THEN** 工具只使用只读 RPC 并打印账户快照，不构造或发送任何交易
