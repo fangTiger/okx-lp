@@ -38,9 +38,65 @@ class ChainIdMismatchError(RpcError):
     """表示可访问节点不属于预期链。"""
 
 
+class ContractRevertError(RpcError):
+    """表示合约确定性回滚，重试无意义。"""
+
+
 _DATA_PATTERN = re.compile(r"^0x(?:[0-9a-fA-F]{2})*$")
 _TRANSACTION_HASH_PATTERN = re.compile(r"^0x[0-9a-fA-F]{64}$")
 _QUANTITY_PATTERN = re.compile(r"^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$")
+_ERROR_STRING_SELECTOR = "0x08c379a0"
+
+
+def _decode_error_string(data: Any) -> str | None:
+    """解码 Solidity 标准 Error(string) 回滚数据。"""
+    if not isinstance(data, str) or not data.lower().startswith(
+        _ERROR_STRING_SELECTOR
+    ):
+        return None
+    try:
+        payload = bytes.fromhex(data[len(_ERROR_STRING_SELECTOR):])
+        if len(payload) < 64:
+            return None
+        offset = int.from_bytes(payload[:32], "big")
+        if offset + 32 > len(payload):
+            return None
+        length = int.from_bytes(payload[offset:offset + 32], "big")
+        start = offset + 32
+        end = start + length
+        if end > len(payload):
+            return None
+        return payload[start:end].decode("utf-8")
+    except (UnicodeDecodeError, ValueError):
+        return None
+
+
+def _contract_revert_detail(error: Any) -> str | None:
+    """识别确定性合约回滚并保留节点返回的原始原因。"""
+    if not isinstance(error, dict):
+        return None
+    message = error.get("message")
+    data = error.get("data")
+    encoded_error = (
+        isinstance(data, str)
+        and data.lower().startswith(_ERROR_STRING_SELECTOR)
+    )
+    is_revert = (
+        error.get("code") == 3
+        or (
+            isinstance(message, str)
+            and "execution reverted" in message.lower()
+        )
+        or encoded_error
+    )
+    if not is_revert:
+        return None
+
+    parts = [message] if isinstance(message, str) and message else []
+    decoded = _decode_error_string(data)
+    if decoded and decoded not in parts:
+        parts.append(decoded)
+    return "；".join(parts) if parts else str(error)
 
 
 def _pattern_validator(method: str, pattern: re.Pattern[str]) -> Callable[[Any], None]:
@@ -155,6 +211,8 @@ class JsonRpcClient:
                         self._verified_indexes.add(index)
                     self._preferred_index = index
                     return result
+                except ContractRevertError:
+                    raise
                 except Exception as error:
                     if isinstance(error, ChainIdMismatchError):
                         self._rejected_indexes.add(index)
@@ -199,7 +257,13 @@ class JsonRpcClient:
         if output.get("id") != request_id:
             raise RpcError(f"{method} 响应 ID 不匹配")
         if "error" in output:
-            raise RpcError(f"{method} 返回错误：{output['error']}")
+            error = output["error"]
+            revert_detail = _contract_revert_detail(error)
+            if revert_detail is not None:
+                raise ContractRevertError(
+                    f"{method} 合约回滚：{revert_detail}"
+                )
+            raise RpcError(f"{method} 返回错误：{error}")
         if "result" not in output:
             raise RpcError(f"{method} 响应缺少 result")
         result = output["result"]

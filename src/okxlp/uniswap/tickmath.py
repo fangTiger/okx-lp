@@ -89,6 +89,53 @@ def position_amounts(
         )
 
 
+def mint_amounts_for_budget(
+    amount0_budget: int,
+    amount1_budget: int,
+    tick_lower: int,
+    tick_upper: int,
+    sqrt_price_x96: int,
+) -> tuple[int, int]:
+    """在两腿预算上限内，返回该区间实际可铸造的配比数量。"""
+    if type(amount0_budget) is not int or type(amount1_budget) is not int:
+        raise ValueError("两腿预算必须是非负整数")
+    if amount0_budget < 0 or amount1_budget < 0:
+        raise ValueError("两腿预算必须是非负整数")
+    if (
+        type(tick_lower) is not int
+        or type(tick_upper) is not int
+        or tick_lower >= tick_upper
+    ):
+        raise ValueError("tick_lower 必须小于 tick_upper")
+    if type(sqrt_price_x96) is not int or sqrt_price_x96 <= 0:
+        raise ValueError("sqrt_price_x96 必须是正整数")
+
+    with localcontext() as context:
+        context.prec = 80
+        sa = (TICK_BASE**tick_lower).sqrt() * Q96
+        sb = (TICK_BASE**tick_upper).sqrt() * Q96
+        sp = Decimal(sqrt_price_x96)
+        if sp <= sa:
+            liquidity = (
+                Decimal(amount0_budget) * sa * sb
+                / ((sb - sa) * Q96)
+            )
+        elif sp >= sb:
+            liquidity = Decimal(amount1_budget) * Q96 / (sb - sa)
+        else:
+            liquidity0 = (
+                Decimal(amount0_budget) * sp * sb
+                / ((sb - sp) * Q96)
+            )
+            liquidity1 = Decimal(amount1_budget) * Q96 / (sp - sa)
+            liquidity = min(liquidity0, liquidity1)
+
+        amount0, amount1 = position_amounts(
+            int(liquidity), tick_lower, tick_upper, sqrt_price_x96,
+        )
+        return min(amount0, amount0_budget), min(amount1, amount1_budget)
+
+
 def aligned_tick_range(current_tick: int, width: Decimal, tick_spacing: int) -> tuple[int, int]:
     """按相对价格宽度计算区间，并把两端向外对齐。"""
     if not Decimal(0) < width < Decimal(1):

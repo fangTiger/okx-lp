@@ -6,6 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.error import URLError
 
+from eth_abi import encode
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import okxlp.chain.rpc as rpc_module
@@ -175,6 +177,161 @@ class RpcClientTest(unittest.TestCase):
         client = JsonRpcClient(retries=0, urlopen=opener, sleep=lambda _delay: None)
         with self.assertRaisesRegex(RpcError, "eth_call"):
             client.eth_call("0x" + "12" * 20, "0x1234")
+
+    def test_contract_revert_stops_after_first_transport_call(self):
+        calls = []
+
+        def opener(request, **_kwargs):
+            calls.append(request.full_url)
+            body = json.loads(request.data)
+            return FakeResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": body["id"],
+                    "error": {
+                        "code": 3,
+                        "message": "execution reverted: Price slippage check",
+                    },
+                }
+            )
+
+        client = JsonRpcClient(
+            ["https://one.example", "https://two.example"],
+            retries=2,
+            urlopen=opener,
+            sleep=lambda _delay: None,
+        )
+        client._verified_indexes.update((0, 1))
+
+        with self.assertRaises(RpcError) as raised:
+            client.eth_call("0x" + "12" * 20, "0x1234")
+
+        self.assertIsInstance(raised.exception, rpc_module.ContractRevertError)
+        self.assertIn("Price slippage check", str(raised.exception))
+        self.assertEqual(calls, ["https://one.example"])
+
+    def test_contract_revert_decodes_error_string_data(self):
+        encoded_reason = "0x08c379a0" + encode(
+            ["string"], ["Price slippage check"]
+        ).hex()
+
+        def opener(request, **_kwargs):
+            body = json.loads(request.data)
+            return FakeResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": body["id"],
+                    "error": {
+                        "code": -32000,
+                        "message": "VM execution error",
+                        "data": encoded_reason,
+                    },
+                }
+            )
+
+        client = JsonRpcClient(retries=2, urlopen=opener)
+        client._verified_indexes.add(0)
+
+        with self.assertRaises(RpcError) as raised:
+            client.eth_call("0x" + "12" * 20, "0x1234")
+
+        self.assertIsInstance(raised.exception, rpc_module.ContractRevertError)
+        self.assertIn("Price slippage check", str(raised.exception))
+
+    def test_contract_revert_code_and_message_conditions_work_independently(self):
+        errors = (
+            {"code": 3, "message": "VM execution error"},
+            {
+                "code": -32000,
+                "message": "execution reverted: Price slippage check",
+            },
+        )
+        for error in errors:
+            with self.subTest(error=error):
+                calls = []
+
+                def opener(request, **_kwargs):
+                    calls.append(request.full_url)
+                    body = json.loads(request.data)
+                    return FakeResponse(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": body["id"],
+                            "error": error,
+                        }
+                    )
+
+                client = JsonRpcClient(
+                    ["https://one.example", "https://two.example"],
+                    retries=2,
+                    urlopen=opener,
+                    sleep=lambda _delay: None,
+                )
+                client._verified_indexes.update((0, 1))
+
+                with self.assertRaises(
+                    rpc_module.ContractRevertError
+                ):
+                    client.eth_call("0x" + "12" * 20, "0x1234")
+
+                self.assertEqual(calls, ["https://one.example"])
+
+    def test_timeout_still_retries_across_all_endpoints(self):
+        calls = []
+
+        def opener(request, **_kwargs):
+            calls.append(request.full_url)
+            raise TimeoutError("超时")
+
+        client = JsonRpcClient(
+            ["https://one.example", "https://two.example"],
+            retries=2,
+            urlopen=opener,
+            sleep=lambda _delay: None,
+        )
+        client._verified_indexes.update((0, 1))
+
+        with self.assertRaises(RpcError):
+            client.eth_call("0x" + "12" * 20, "0x1234")
+
+        self.assertEqual(
+            calls,
+            ["https://one.example", "https://two.example"] * 3,
+        )
+
+    def test_first_endpoint_revert_is_not_hidden_by_later_success(self):
+        calls = []
+
+        def opener(request, **_kwargs):
+            calls.append(request.full_url)
+            body = json.loads(request.data)
+            if request.full_url == "https://one.example":
+                return FakeResponse(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": body["id"],
+                        "error": {
+                            "code": 3,
+                            "message": "execution reverted: Price slippage check",
+                        },
+                    }
+                )
+            return FakeResponse(
+                {"jsonrpc": "2.0", "id": body["id"], "result": "0x1234"}
+            )
+
+        client = JsonRpcClient(
+            ["https://one.example", "https://two.example"],
+            retries=0,
+            urlopen=opener,
+        )
+        client._verified_indexes.update((0, 1))
+
+        with self.assertRaises(RpcError) as raised:
+            client.eth_call("0x" + "12" * 20, "0x1234")
+
+        self.assertIsInstance(raised.exception, rpc_module.ContractRevertError)
+        self.assertEqual(calls, ["https://one.example"])
 
     def test_rejects_write_rpc_method(self):
         client = JsonRpcClient(urlopen=lambda *_args, **_kwargs: None)

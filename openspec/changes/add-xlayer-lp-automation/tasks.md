@@ -135,3 +135,9 @@
 - [x] 17.2 扩展 `clear_stage_lock.py`，支持只读对账后的可选原子状态复位
 - [x] 17.3 放宽生产入口 ENTERING 与 EXITING 启动闸门，并保留 REBALANCING 硬拒绝
 - [x] 17.4 运行完整单测、OpenSpec 校验与 risk/log 红线自查
+
+## M18 mint 配比滑点与确定性回滚短路（批次 12）
+- [x] 18.1 以 TDD 实现两腿预算约束下的精确 mint 区间配比
+- [x] 18.2 `enter` 基于配比后 desired 计算滑点下限，并允许区间外单腿为零
+- [x] 18.3 RPC 识别并解码确定性合约回滚，立即中止跨节点重试
+- [x] 18.4 完成 337 项单测、OpenSpec 校验与 risk/log 红线自查

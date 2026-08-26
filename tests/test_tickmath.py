@@ -1,4 +1,5 @@
 import sys
+import random
 import unittest
 from decimal import Decimal, localcontext
 from pathlib import Path
@@ -169,6 +170,100 @@ class TickMathTest(unittest.TestCase):
             Decimal("39.5639786605") - actual_value,
             Decimal("0.0000011"),
         )
+
+    def test_mint_amounts_for_budget_matches_live_slippage_regression(self):
+        budget0 = 14_364_270_543_869_171
+        budget1 = 24_928_642
+        price = Decimal(
+            "1745.3959081193072478579642945455192641995700571299668624074510048721507239987230"
+        )
+        sqrt_price = price_to_sqrt_price_x96(price, 18, 6)
+
+        amount0, amount1 = tickmath.mint_amounts_for_budget(
+            budget0, budget1, -201_730, -201_620, sqrt_price,
+        )
+
+        self.assertLess(abs(amount0 - 13_246_461_000_000_000), 10**12)
+        self.assertLessEqual(abs(amount1 - 24_928_641), 1)
+        self.assertLessEqual(amount0, budget0)
+        self.assertLessEqual(amount1, budget1)
+        self.assertGreater(Decimal(amount0) / Decimal(budget0), Decimal("0.92"))
+        self.assertLess(Decimal(amount0) / Decimal(budget0), Decimal("0.93"))
+
+    def test_mint_amounts_for_budget_handles_prices_outside_range(self):
+        cases = (
+            (Decimal("0.99"), True),
+            (Decimal("1.02"), False),
+        )
+        for price, below in cases:
+            with self.subTest(price=price):
+                actual = tickmath.mint_amounts_for_budget(
+                    10**18, 10**18, 0, 100,
+                    price_to_sqrt_price_x96(price, 0, 0),
+                )
+                if below:
+                    self.assertGreater(actual[0], 0)
+                    self.assertEqual(actual[1], 0)
+                else:
+                    self.assertEqual(actual[0], 0)
+                    self.assertGreater(actual[1], 0)
+
+    def test_mint_amounts_for_budget_accepts_zero_leg_budget(self):
+        below = tickmath.mint_amounts_for_budget(
+            10**18, 0, 0, 100,
+            price_to_sqrt_price_x96(Decimal("0.99"), 0, 0),
+        )
+        above = tickmath.mint_amounts_for_budget(
+            0, 10**18, 0, 100,
+            price_to_sqrt_price_x96(Decimal("1.02"), 0, 0),
+        )
+        in_range = price_to_sqrt_price_x96(Decimal("1.005"), 0, 0)
+
+        self.assertGreater(below[0], 0)
+        self.assertEqual(below[1], 0)
+        self.assertEqual(above[0], 0)
+        self.assertGreater(above[1], 0)
+        self.assertEqual(
+            tickmath.mint_amounts_for_budget(0, 10**18, 0, 100, in_range),
+            (0, 0),
+        )
+        self.assertEqual(
+            tickmath.mint_amounts_for_budget(10**18, 0, 0, 100, in_range),
+            (0, 0),
+        )
+
+    def test_mint_amounts_for_budget_validates_inputs(self):
+        cases = (
+            ((1, 1, 0, 0, 1), "tick_lower"),
+            ((-1, 1, 0, 1, 1), "预算"),
+            ((1, -1, 0, 1, 1), "预算"),
+            ((1, 1, 0, 1, 0), "sqrt_price_x96"),
+        )
+        for arguments, message in cases:
+            with self.subTest(arguments=arguments):
+                with self.assertRaisesRegex(ValueError, message):
+                    tickmath.mint_amounts_for_budget(*arguments)
+
+    def test_mint_amounts_for_budget_never_exceeds_random_budgets(self):
+        generator = random.Random(12)
+        for _index in range(80):
+            tick_lower = generator.randint(-1_000, 1_000)
+            tick_upper = tick_lower + generator.randint(1, 400)
+            current_tick = generator.randint(tick_lower - 100, tick_upper + 100)
+            budget0 = generator.randint(0, 10**24)
+            budget1 = generator.randint(0, 10**24)
+            sqrt_price = price_to_sqrt_price_x96(
+                tick_to_price(current_tick, 0, 0), 0, 0,
+            )
+
+            amount0, amount1 = tickmath.mint_amounts_for_budget(
+                budget0, budget1, tick_lower, tick_upper, sqrt_price,
+            )
+
+            self.assertGreaterEqual(amount0, 0)
+            self.assertGreaterEqual(amount1, 0)
+            self.assertLessEqual(amount0, budget0)
+            self.assertLessEqual(amount1, budget1)
 
 
 if __name__ == "__main__":

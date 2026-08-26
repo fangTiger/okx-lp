@@ -79,6 +79,21 @@
 - **WHEN** 交易在发送前的链上模拟中回滚
 - **THEN** 系统中止该交易、记录 revert 原因并告警
 
+### Requirement: 确定性合约回滚立即中止
+系统 MUST 把合约执行回滚与暂时性网络错误区分处理；确定性回滚不得重试或跨节点故障转移，且错误消息必须保留合约给出的原因。
+
+#### Scenario: 首个节点返回合约回滚
+- **WHEN** 任一 RPC 调用返回 code 3、`execution reverted` 消息或标准 `Error(string)` 数据
+- **THEN** 客户端抛出确定性合约回滚异常并立即中止，不再调用当前或其他节点
+
+#### Scenario: 标准回滚数据包含字符串
+- **WHEN** RPC 错误数据以 `0x08c379a0` 开头并包含 ABI 编码的回滚字符串
+- **THEN** 客户端解码该字符串并附在异常消息中
+
+#### Scenario: 暂时性网络错误
+- **WHEN** RPC 节点超时或发生普通网络错误
+- **THEN** 客户端继续按既有次数在节点间重试和故障转移
+
 ### Requirement: LP Delta 对冲
 系统 SHALL 计算 LP 头寸的实时 delta 并维持对冲腿在容忍区间内。
 
@@ -234,7 +249,15 @@
 
 #### Scenario: 建仓完整顺序与参数保护
 - **WHEN** enter 具有正数可用本金
-- **THEN** 必要 approve 全部先于 swap 与 mint，mint 使用状态机传入的 ticks、非零最小数量、owner recipient 和受限 deadline
+- **THEN** 必要 approve 全部先于 swap 与 mint，mint 使用状态机传入的 ticks、按当前价与区间配比后的 desired、基于 desired 的滑点下限、owner recipient 和受限 deadline
+
+#### Scenario: 建仓配比受两腿预算约束
+- **WHEN** swap 完成或跳过后得到两腿可投入预算
+- **THEN** 系统按当前 `sqrtPriceX96` 与目标 tick 区间求预算允许的最大流动性，并把该流动性的实际两腿数量作为 mint desired，任何一腿不得超过对应预算
+
+#### Scenario: 建仓价格位于区间外
+- **WHEN** 当前价格位于 mint 目标区间下方或上方
+- **THEN** 数学上不需要的那一腿 desired 与 minimum 均允许为零，另一腿 minimum 按 desired 扣除最大滑点后向下取整
 
 #### Scenario: 撤出清成 USDC
 - **WHEN** exit 处理唯一有效本池头寸

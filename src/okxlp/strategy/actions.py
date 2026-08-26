@@ -18,7 +18,7 @@ from okxlp.strategy.allocation import (
     BalanceSnapshot, calculate_50_50_swap, load_min_swap_usd,
 )
 from okxlp.strategy.rebalance import RebalanceActions
-from okxlp.uniswap.tickmath import position_amounts
+from okxlp.uniswap.tickmath import mint_amounts_for_budget, position_amounts
 
 
 LOGGER = logging.getLogger(__name__)
@@ -97,12 +97,12 @@ class ProductionActions:
     def _minimum(self, desired: int) -> int:
         if desired == 0:
             return 0
-        minimum = int(
-            (
-                Decimal(desired)
-                * (BPS - self.swap_policy.max_slippage_bps)
-                / BPS
-            ).to_integral_value(rounding=ROUND_FLOOR)
+        slippage_numerator, slippage_denominator = (
+            self.swap_policy.max_slippage_bps.as_integer_ratio()
+        )
+        minimum = (
+            desired * (10_000 * slippage_denominator - slippage_numerator)
+            // (10_000 * slippage_denominator)
         )
         if minimum <= 0:
             raise ActionError("mint 最低数量为 0，拒绝无保护建仓")
@@ -290,14 +290,21 @@ class ProductionActions:
                     capital_usd,
                     self._available_usd(current, sample.price),
                 )
-                asset_desired, usdc_desired = self._deployment_amounts(
+                asset_budget, usdc_budget = self._deployment_amounts(
                     current, mint_capital, sample.price
                 )
             else:
-                asset_desired, usdc_desired = estimated_asset, estimated_usdc
-                LOGGER.info("dry-run mint desired 使用 swap 报价估算余额")
-            amount0_desired, amount1_desired = self._ordered_amounts(
-                asset_desired, usdc_desired
+                asset_budget, usdc_budget = estimated_asset, estimated_usdc
+                LOGGER.info("dry-run mint budget 使用 swap 报价估算余额")
+            budget0, budget1 = self._ordered_amounts(
+                asset_budget, usdc_budget
+            )
+            amount0_desired, amount1_desired = mint_amounts_for_budget(
+                budget0,
+                budget1,
+                band.tick_lower,
+                band.tick_upper,
+                sample.sqrt_price_x96,
             )
             mint = self.position_manager.mint(
                 token0=self.token0.address,

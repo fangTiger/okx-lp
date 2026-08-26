@@ -15,7 +15,8 @@ from okxlp.uniswap.portfolio import OwnedPosition, PortfolioSnapshot
 from okxlp.uniswap.position import PositionManager
 from okxlp.uniswap.swap import ScheduledSwap, SwapPolicy, SwapQuote
 from okxlp.uniswap.tickmath import (
-    position_amounts, price_to_sqrt_price_x96, tick_to_price,
+    mint_amounts_for_budget, position_amounts, price_to_sqrt_price_x96,
+    price_to_tick, tick_to_price,
 )
 
 
@@ -32,7 +33,18 @@ FAILURE_SAMPLE = MarketSample(
     Decimal("1738"), -202_925,
     price_to_sqrt_price_x96(Decimal("1738"), 18, 6),
 )
+MINT_REGRESSION_PRICE = Decimal(
+    "1745.3959081193072478579642945455192641995700571299668624074510048721507239987230"
+)
+MINT_REGRESSION_SAMPLE = MarketSample(
+    MINT_REGRESSION_PRICE,
+    price_to_tick(MINT_REGRESSION_PRICE, 18, 6),
+    price_to_sqrt_price_x96(MINT_REGRESSION_PRICE, 18, 6),
+)
 BAND = PriceBand(-201_591, -201_463, Decimal("1990"), Decimal("2010"))
+MINT_REGRESSION_BAND = PriceBand(
+    -201_730, -201_620, Decimal("1735"), Decimal("1755"),
+)
 POOL = SimpleNamespace(
     token0=SimpleNamespace(address=TOKEN0, symbol="wASMLx", decimals=18),
     token1=SimpleNamespace(address=TOKEN1, symbol="USDC", decimals=6),
@@ -265,7 +277,14 @@ class ProductionEnterTest(unittest.TestCase):
                 * Decimal(10**6)
             ).to_integral_value(rounding=ROUND_FLOOR)
         )
-        self.assertEqual(mint[5:7], (asset_raw, expected_usdc))
+        self.assertEqual(
+            mint[5:7],
+            mint_amounts_for_budget(
+                asset_raw, expected_usdc,
+                BAND.tick_lower, BAND.tick_upper,
+                FAILURE_SAMPLE.sqrt_price_x96,
+            ),
+        )
 
     def test_asset_heavy_enter_sells_asset_for_usdc(self):
         reader = SequenceReader(
@@ -327,10 +346,69 @@ class ProductionEnterTest(unittest.TestCase):
         actions.enter(FAILURE_SAMPLE, BAND, allow_broadcast=True)
 
         mint = decode_mint(dependencies.executor.intents[-1])
-        self.assertEqual(mint[5:7], (after_swap_asset, after_swap_usdc))
+        self.assertEqual(
+            mint[5:7],
+            mint_amounts_for_budget(
+                after_swap_asset, after_swap_usdc,
+                BAND.tick_lower, BAND.tick_upper,
+                FAILURE_SAMPLE.sqrt_price_x96,
+            ),
+        )
         self.assertEqual(len(reader.calls), 2)
         self.assertGreater(mint[7], 0)
-        self.assertGreater(mint[8], 0)
+        self.assertEqual(mint[8], 0)
+
+    def test_mint_desired_uses_exact_band_ratio_within_wallet_budgets(self):
+        budget0 = 14_364_270_543_869_171
+        budget1 = 24_928_642
+        reader = SequenceReader(snapshot(balance0=budget0, balance1=budget1))
+        actions, dependencies = make_actions(reader=reader, fact_limit=100)
+
+        actions.enter(MINT_REGRESSION_SAMPLE, MINT_REGRESSION_BAND)
+
+        self.assertEqual(dependencies.swap_router.calls, [])
+        mint = decode_mint(dependencies.executor.intents[-1])
+        expected = mint_amounts_for_budget(
+            budget0, budget1,
+            MINT_REGRESSION_BAND.tick_lower,
+            MINT_REGRESSION_BAND.tick_upper,
+            MINT_REGRESSION_SAMPLE.sqrt_price_x96,
+        )
+        self.assertEqual(mint[5:7], expected)
+
+    def test_mint_minimums_apply_slippage_to_ratio_not_budgets(self):
+        budget0 = 14_364_270_543_869_171
+        budget1 = 24_928_642
+        reader = SequenceReader(snapshot(balance0=budget0, balance1=budget1))
+        actions, dependencies = make_actions(reader=reader, fact_limit=100)
+
+        actions.enter(MINT_REGRESSION_SAMPLE, MINT_REGRESSION_BAND)
+
+        mint = decode_mint(dependencies.executor.intents[-1])
+        self.assertLess(mint[5], budget0)
+        self.assertEqual(mint[7], expected_minimum(mint[5]))
+        self.assertEqual(mint[8], expected_minimum(mint[6]))
+        self.assertNotEqual(mint[7], expected_minimum(budget0))
+
+    def test_mint_minimum_uses_exact_floor_for_large_raw_amount(self):
+        actions, _dependencies = make_actions()
+        desired = 10_000_000_000_000_000_000_123_456_789
+
+        minimum = actions._minimum(desired)
+
+        self.assertEqual(minimum, desired * 9_970 // 10_000)
+
+    def test_mint_outside_range_allows_zero_desired_and_minimum_leg(self):
+        sample = sample_at_tick(BAND.tick_lower - 10)
+        actions, dependencies = make_actions(fact_limit=100)
+
+        actions.enter(sample, BAND)
+
+        mint = decode_mint(dependencies.executor.intents[-1])
+        self.assertGreater(mint[5], 0)
+        self.assertEqual(mint[6], 0)
+        self.assertGreater(mint[7], 0)
+        self.assertEqual(mint[8], 0)
 
     def test_zero_available_capital_fails_before_constructing_any_intent(self):
         approval = FakeApprovalManager()
@@ -380,8 +458,11 @@ class ProductionEnterTest(unittest.TestCase):
 
     def test_mint_uses_nonzero_minimums_deadline_owner_and_exact_band(self):
         actions, dependencies = make_actions()
+        in_range_sample = sample_at_tick(
+            (BAND.tick_lower + BAND.tick_upper) // 2
+        )
 
-        actions.enter(SAMPLE, BAND)
+        actions.enter(in_range_sample, BAND)
 
         values = decode_mint(dependencies.executor.intents[-1])
         self.assertEqual(values[3:5], (BAND.tick_lower, BAND.tick_upper))
