@@ -6,7 +6,6 @@ import json
 import multiprocessing
 import time
 from collections.abc import Mapping
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -179,8 +178,17 @@ class RemoteSigner:
             or not isinstance(calldata_policy, CalldataPolicy)
         ):
             raise RemoteSignerError("签名子进程启动参数非法")
-        payload = asdict(calldata_policy)
-        payload["allowed_token_ids"] = sorted(calldata_policy.allowed_token_ids)
+        payload = {
+            "executor_address": calldata_policy.executor_address,
+            "npm_address": calldata_policy.npm_address,
+            "router_address": calldata_policy.router_address,
+            "token0": calldata_policy.token0,
+            "token1": calldata_policy.token1,
+            "fee": calldata_policy.fee,
+            "allowed_token_ids": sorted(calldata_policy.allowed_token_ids),
+            "max_approval_raw": dict(calldata_policy.max_approval_raw),
+            "max_deadline_seconds": calldata_policy.max_deadline_seconds,
+        }
         context = multiprocessing.get_context("spawn")
         parent_connection, child_connection = context.Pipe(duplex=True)
         self._address = ""

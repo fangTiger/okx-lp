@@ -24,6 +24,7 @@ TOKEN0 = "0x9147b03c16b18fc4f686f610f189f91ddf4347b4"
 TOKEN1 = "0xb6ceceab302e2e4948951ee7843fc24e92933061"
 ATTACKER = "0x9999999999999999999999999999999999999999"
 TOKEN_ID = 15857
+MAX_APPROVALS = {TOKEN0: 100 * 10**18, TOKEN1: 200_000 * 10**6}
 
 
 def collect_calldata(recipient: str) -> str:
@@ -31,6 +32,13 @@ def collect_calldata(recipient: str) -> str:
     values = (TOKEN_ID, recipient, 2**128 - 1, 2**128 - 1)
     return "0xfc6f7865" + encode(
         ["(uint256,address,uint128,uint128)"], [values]
+    ).hex()
+
+
+def approve_calldata(spender: str, amount: int) -> str:
+    """构造参数完整的 approve calldata。"""
+    return "0x095ea7b3" + encode(
+        ["(address,uint256)"], [(spender, amount)]
     ).hex()
 
 
@@ -73,6 +81,7 @@ class RemoteSignerTest(unittest.TestCase):
             token1=TOKEN1,
             fee=500,
             allowed_token_ids=frozenset({TOKEN_ID}),
+            max_approval_raw=MAX_APPROVALS,
         )
 
     def _signer(self) -> RemoteSigner:
@@ -89,12 +98,14 @@ class RemoteSignerTest(unittest.TestCase):
         self.addCleanup(signer.close)
         return signer
 
-    def _transaction(self, *, recipient=None, to=NPM, chain_id=CHAIN_ID):
+    def _transaction(
+        self, *, recipient=None, to=NPM, chain_id=CHAIN_ID, data=None
+    ):
         return {
             "chainId": chain_id,
             "nonce": 0,
             "to": to,
-            "data": collect_calldata(recipient or self.account.address),
+            "data": data or collect_calldata(recipient or self.account.address),
             "value": 0,
             "gas": 120_000,
             "maxFeePerGas": 20_000_000,
@@ -139,6 +150,23 @@ class RemoteSignerTest(unittest.TestCase):
             with self.subTest(transaction=transaction):
                 with self.assertRaises(RemoteSignerError):
                     signer.sign_transaction(transaction)
+
+    def test_child_policy_rejects_attacker_approve_and_signs_legal_approve(self):
+        signer = self._signer()
+        attack = self._transaction(
+            to=TOKEN0,
+            data=approve_calldata(ATTACKER, MAX_APPROVALS[TOKEN0]),
+        )
+
+        with self.assertRaisesRegex(RemoteSignerError, "spender"):
+            signer.sign_transaction(attack)
+
+        legal = self._transaction(
+            to=TOKEN0,
+            data=approve_calldata(NPM, MAX_APPROVALS[TOKEN0]),
+        )
+        raw = signer.sign_transaction(legal)
+        self.assertEqual(Account.recover_transaction(raw), self.account.address)
 
     def test_ipc_rejects_pickle_payload_before_it_reaches_child(self):
         signer = self._signer()

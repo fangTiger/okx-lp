@@ -14,6 +14,7 @@ ROUTER = "0x4f0c28f5926afda16bf2506d5d9e57ea190f9bca"
 QUOTER = "0xd1b797d92d87b688193a2b976efc8d577d204343"
 PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
 TOKEN = "0x9147b03c16b18fc4f686f610f189f91ddf4347b4"
+TOKEN1 = "0xb6ceceab302e2e4948951ee7843fc24e92933061"
 
 
 class TransactionWhitelistTest(unittest.TestCase):
@@ -84,6 +85,14 @@ class TransactionWhitelistTest(unittest.TestCase):
         with self.assertRaises(WhitelistError):
             whitelist.validate(NPM, "0x219f5d17")
         self.assertEqual(whitelist.validate(ROUTER, "0x04e45aaf"), "0x04e45aaf")
+        self.assertEqual(whitelist.validate(TOKEN, "0x095ea7b3"), "0x095ea7b3")
+        self.assertEqual(whitelist.validate(TOKEN1, "0x095ea7b3"), "0x095ea7b3")
+
+        for name in ("wasmlx", "usdc"):
+            self.assertEqual(
+                data["whitelist"]["targets"][name]["selectors"],
+                {"approve": "0x095ea7b3"},
+            )
 
 
 if __name__ == "__main__":

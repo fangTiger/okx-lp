@@ -24,6 +24,12 @@ gas:
   min_priority_fee_gwei: 0.001
   max_priority_fee_gwei: 0.1
 
+# 授权额度上限。绝不使用无限授权；探针仓 $2000，此处已留足冗余。
+approval:
+  max_amount_raw:
+    "0x9147b03c16b18fc4f686f610f189f91ddf4347b4": "100000000000000000000"   # 100 wASMLx（18 位）
+    "0xb6ceceab302e2e4948951ee7843fc24e92933061": "200000000000"            # 200,000 USDC（6 位）
+
 # 选择器必须绑定具体目标；QuoterV2 是只读 eth_call，不进入签名白名单。
 whitelist:
   targets:
@@ -38,3 +44,11 @@ whitelist:
       address: "0x4f0c28f5926afda16bf2506d5d9e57ea190f9bca"
       selectors:
         exactInputSingle: "0x04e45aaf"
+    wasmlx:
+      address: "0x9147b03c16b18fc4f686f610f189f91ddf4347b4"
+      selectors:
+        approve: "0x095ea7b3"
+    usdc:
+      address: "0xb6ceceab302e2e4948951ee7843fc24e92933061"
+      selectors:
+        approve: "0x095ea7b3"

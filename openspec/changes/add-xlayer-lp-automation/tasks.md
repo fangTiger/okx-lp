@@ -98,3 +98,10 @@
 - [x] 12.2 实现 `uniswap/portfolio.py` 同区块只读账户快照
 - [x] 12.3 实现 `tools/read_portfolio.py` 只读验收工具
 - [x] 12.4 运行完整单测与真实链只读验收，并核对已锁定头寸字段
+
+## M13 自动 ERC20 授权（批次 6，仅构造与校验）
+- [x] 13.1 为两腿代币增加仅含 approve 的目标白名单与显式授权上限
+- [x] 13.2 用参数级策略锁死 token、spender、额度、value 与 ABI 长度
+- [x] 13.3 实现同区块 allowance 驱动的 `ApprovalManager` 并对 Intent 自检
+- [x] 13.4 实现拒绝广播的 `tools/ensure_approvals.py` dry-run 工具
+- [ ] 13.5 运行完整单测、真实链只读验收与 ERC20 多余方法自查

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import yaml
@@ -23,6 +25,7 @@ DECREASE = ("0x0c49ccbe", "(uint256,uint128,uint256,uint256,uint256)", 5)
 COLLECT = ("0xfc6f7865", "(uint256,address,uint128,uint128)", 4)
 BURN = ("0x42966c68", "uint256", 1)
 SWAP = ("0x04e45aaf", "(address,address,uint24,address,uint256,uint256,uint160)", 7)
+APPROVE = ("0x095ea7b3", "(address,uint256)", 2)
 
 
 class CalldataPolicyError(ValueError):
@@ -69,6 +72,7 @@ class CalldataPolicy:
     token1: str
     fee: int
     allowed_token_ids: frozenset[int]
+    max_approval_raw: Mapping[str, int]
     max_deadline_seconds: int = 3600
 
     def __post_init__(self) -> None:
@@ -93,6 +97,34 @@ class CalldataPolicy:
                     f"allowed_token_ids 只能包含非负整数，实际值={token_id}"
                 )
         object.__setattr__(self, "allowed_token_ids", token_ids)
+        if not isinstance(self.max_approval_raw, Mapping):
+            raise CalldataPolicyError("max_approval_raw 必须是地址到正整数的映射")
+        limits: dict[str, int] = {}
+        for raw_token, amount in self.max_approval_raw.items():
+            token = _address(raw_token, "max_approval_raw 的键")
+            if token in limits:
+                raise CalldataPolicyError(
+                    f"max_approval_raw 包含重复代币地址：{token}"
+                )
+            if type(amount) is not int or amount <= 0:
+                raise CalldataPolicyError(
+                    "max_approval_raw 的值必须是正整数："
+                    f"token={token}，实际值={amount}"
+                )
+            limits[token] = amount
+        expected_tokens = frozenset((self.token0, self.token1))
+        if len(expected_tokens) != 2:
+            raise CalldataPolicyError("token0 与 token1 必须是两个不同地址")
+        if frozenset(limits) != expected_tokens:
+            missing = sorted(expected_tokens - frozenset(limits))
+            extra = sorted(frozenset(limits) - expected_tokens)
+            raise CalldataPolicyError(
+                "max_approval_raw 必须恰好包含 token0 与 token1："
+                f"缺少={missing}，多余={extra}"
+            )
+        object.__setattr__(
+            self, "max_approval_raw", MappingProxyType(dict(limits))
+        )
 
     @classmethod
     def from_config(
@@ -112,6 +144,19 @@ class CalldataPolicy:
         router_address = _required(
             addresses, "swap_router02", "execution.addresses"
         )
+        approval = _mapping(
+            _required(execution, "approval", "执行配置"), "execution.approval"
+        )
+        raw_limits = _mapping(
+            _required(approval, "max_amount_raw", "execution.approval"),
+            "execution.approval.max_amount_raw",
+        )
+        approval_limits = {
+            token: int(amount)
+            if type(amount) is str and re.fullmatch(r"[0-9]+", amount)
+            else amount
+            for token, amount in raw_limits.items()
+        }
 
         root = _read_mapping(pools_path, "池配置")
         pools = _required(root, "pools", "池配置")
@@ -161,6 +206,7 @@ class CalldataPolicy:
             token1=_required(token1, "address", f"pools[{index}].token1"),
             fee=int(fee_units),
             allowed_token_ids=frozenset(allowed_token_ids),
+            max_approval_raw=approval_limits,
         )
 
     def validate(
@@ -211,6 +257,12 @@ class CalldataPolicy:
         validator(decoded, now_ts)
 
     def _dispatch(self, target: str, selector: str) -> tuple[str, int, Any]:
+        approve_route = (
+            APPROVE[1], APPROVE[2],
+            lambda values, now_ts: self._validate_approve(
+                target, values, now_ts
+            ),
+        )
         routes = {
             (self.npm_address, MINT[0]): (MINT[1], MINT[2], self._validate_mint),
             (self.npm_address, DECREASE[0]): (
@@ -221,6 +273,8 @@ class CalldataPolicy:
             ),
             (self.npm_address, BURN[0]): (BURN[1], BURN[2], self._validate_burn),
             (self.router_address, SWAP[0]): (SWAP[1], SWAP[2], self._validate_swap),
+            (self.token0, APPROVE[0]): approve_route,
+            (self.token1, APPROVE[0]): approve_route,
         }
         try:
             return routes[(target, selector)]
@@ -328,4 +382,21 @@ class CalldataPolicy:
             raise CalldataPolicyError(
                 "amountOutMinimum 不合规："
                 f"期望正整数，实际值={amount_out_minimum}"
+            )
+
+    def _validate_approve(
+        self, target: str, values: tuple[Any, ...], _now_ts: int
+    ) -> None:
+        spender, amount = values
+        spender = spender.lower()
+        allowed_spenders = frozenset((self.npm_address, self.router_address))
+        if spender not in allowed_spenders:
+            raise CalldataPolicyError(
+                "spender 不合规："
+                f"期望属于={sorted(allowed_spenders)}，实际值={spender}"
+            )
+        maximum = self.max_approval_raw[target]
+        if type(amount) is not int or not 0 <= amount <= maximum:
+            raise CalldataPolicyError(
+                f"amount 不合规：期望范围=0..{maximum}，实际值={amount}"
             )

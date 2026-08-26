@@ -174,6 +174,39 @@
 - **WHEN** 已记录授权额度恰好等于需要额度
 - **THEN** `has_sufficient_allowance` 返回真；需要额度多一时返回假
 
+### Requirement: ERC20 授权参数级白名单
+系统 MUST 仅允许本池两腿代币调用 `approve(address,uint256)`，spender 只能是 NPM 或 SwapRouter02，且额度不得超过该代币显式配置的正整数上限。
+
+#### Scenario: 合法授权
+- **WHEN** 本池代币向 NPM 或 SwapRouter02 授权，且额度在零到配置上限之间
+- **THEN** 参数策略允许该 Intent 继续流转
+
+#### Scenario: 无限授权或未知 spender
+- **WHEN** 授权额度超过配置上限，或 spender 不是 NPM 与 SwapRouter02
+- **THEN** 主进程和签名子进程均拒绝该 Intent
+
+#### Scenario: 授权配置不完整
+- **WHEN** 授权上限映射缺少任一池代币、包含多余代币或额度不是正整数
+- **THEN** 参数策略构造失败，不使用默认值
+
+### Requirement: 自动授权补足计划
+系统 MUST 在一个固定区块读取全部所需 allowance；额度不足时构造补到对应配置上限的 approve Intent，并在返回前通过参数策略自检。
+
+#### Scenario: 当前额度不足
+- **WHEN** 当前 allowance 小于需求且需求不超过配置上限
+- **THEN** 系统生成一笔额度等于配置上限的 approve Intent
+
+#### Scenario: 需求超过上限
+- **WHEN** 所需额度大于该代币配置上限
+- **THEN** 系统以中文错误要求人工提高上限，不自动放宽配置
+
+### Requirement: 授权只读 dry-run 工具
+系统 MUST 提供要求 `--owner` 的授权检查 CLI，打印每个代币与允许 spender 的当前额度、充足状态及待执行 approve Intent，但不得签名或广播。
+
+#### Scenario: 请求广播
+- **WHEN** 操作者向授权检查工具传入 `--broadcast`
+- **THEN** 工具以非零状态退出并说明广播需在生产入口接线完成后启用
+
 ### Requirement: 只读验收工具
 系统 MUST 提供要求 `--owner` 参数的只读 CLI，输出区块、owner、本池头寸区间与流动性、是否处于区间内、两腿余额及 NPM 和 SwapRouter02 授权额度。
 
