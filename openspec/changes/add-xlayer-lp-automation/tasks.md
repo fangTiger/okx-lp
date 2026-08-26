@@ -153,3 +153,11 @@
 - [x] 20.2 为 `clear_stage_lock.py` 增加唯一未完成轮次定位与 `--rebalance-id`
 - [x] 20.3 保持 swap 失败与生产入口 REBALANCING 无人值守路径硬拒绝
 - [x] 20.4 完成全量单测、OpenSpec 校验与 config/log 红线自查
+
+## M21 任意币序与 USDG/wMRNAx（批次 17）
+- [x] 21.1 以 TDD 覆盖必填 `quote_leg`、镜像估值、50/50 方向与美元金额
+- [x] 21.2 用统一计价函数修正本金预算、mint 模拟、撤出及 NAV 的双币序估值
+- [x] 21.3 为生产、预览、清锁、只读工具增加兼容缺省首池的 `--pool-id`
+- [x] 21.4 接入 USDG/wMRNAx 池、有限额授权白名单与参数级 calldata 策略
+- [x] 21.5 将再平衡进度、每日计数与 NAV 按池隔离，并覆盖回归测试
+- [x] 21.6 完成全量单测、OpenSpec 校验与 risk/log/USDC 逻辑红线自查

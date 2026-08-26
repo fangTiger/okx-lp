@@ -96,8 +96,8 @@ class ClearStageLockToolTest(unittest.TestCase):
     def write_rebalance(
         self, rebalance_id, *, completed=(), failed_stage=None, error=None,
     ):
-        journal_dir = self.state_dir / "rebalances"
-        journal_dir.mkdir(exist_ok=True)
+        journal_dir = self.state_dir / "rebalances" / "pool-1"
+        journal_dir.mkdir(parents=True, exist_ok=True)
         path = journal_dir / f"{rebalance_id}.json"
         payload = {
             "rebalance_id": rebalance_id,
@@ -135,6 +135,17 @@ class ClearStageLockToolTest(unittest.TestCase):
             printer=output.append,
         )
         return code, "\n".join(output), reader
+
+    def test_pool_id_is_optional_and_selectable(self):
+        tool = load_tool()
+
+        self.assertIsNone(
+            tool.build_parser().parse_args(["--owner", OWNER]).pool_id
+        )
+        selected = tool.build_parser().parse_args([
+            "--owner", OWNER, "--pool-id", "wMRNAx_USDG",
+        ])
+        self.assertEqual(selected.pool_id, "wMRNAx_USDG")
 
     def test_wrong_confirmation_returns_nonzero_and_preserves_exact_bytes(self):
         before = self.state_path.read_bytes()
@@ -343,8 +354,8 @@ class ClearStageLockToolTest(unittest.TestCase):
 
     def test_reset_rebalancing_corrupt_progress_is_rejected(self):
         self.write_state("REBALANCING")
-        journal_dir = self.state_dir / "rebalances"
-        journal_dir.mkdir()
+        journal_dir = self.state_dir / "rebalances" / "pool-1"
+        journal_dir.mkdir(parents=True)
         (journal_dir / "broken.json").write_text("{", encoding="utf-8")
         before = self.state_path.read_bytes()
 

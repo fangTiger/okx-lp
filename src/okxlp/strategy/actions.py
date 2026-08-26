@@ -16,7 +16,7 @@ from okxlp.config_validation import address as validate_address
 from okxlp.exec.authorization import require_broadcast_flag
 from okxlp.exec.intent import Intent, IntentStatus
 from okxlp.strategy.allocation import (
-    BalanceSnapshot, calculate_50_50_swap, load_min_swap_usd,
+    BalanceSnapshot, calculate_50_50_swap, load_min_swap_usd, quote_value,
 )
 from okxlp.strategy.rebalance import RebalanceActions
 from okxlp.uniswap.tickmath import mint_amounts_for_budget, position_amounts
@@ -65,14 +65,9 @@ class ProductionActions:
         self.mint_min_deposit_bps = _mint_min_deposit_bps()
         self.token0 = pool.token0
         self.token1 = pool.token1
-        stable = tuple(
-            token for token in (self.token0, self.token1)
-            if token.symbol.upper() == "USDC"
-        )
-        if len(stable) != 1:
-            raise ActionError("目标池必须恰好包含一腿 USDC")
-        self.usdc = stable[0]
-        self.asset = self.token1 if self.usdc is self.token0 else self.token0
+        self.quote_token = pool.quote_token
+        self.base_token = pool.base_token
+        self.quote_is_token1 = self.quote_token is self.token1
         fee_units = Decimal(str(pool.fee_bps)) * Decimal(100)
         if fee_units != fee_units.to_integral_value():
             raise ActionError("pool.fee_bps 无法精确换算为 Uniswap fee")
@@ -95,56 +90,74 @@ class ProductionActions:
         )
 
     def _ordered_amounts(
-        self, asset_amount: int, usdc_amount: int
+        self, base_amount: int, quote_amount: int
     ) -> tuple[int, int]:
-        if self.asset is self.token0:
-            return asset_amount, usdc_amount
-        return usdc_amount, asset_amount
+        if self.base_token is self.token0:
+            return base_amount, quote_amount
+        return quote_amount, base_amount
+
+    def _quote_value(
+        self, amount0_raw: int, amount1_raw: int, price: Decimal
+    ) -> Decimal:
+        """按本池显式计价腿折算两腿总价值。"""
+        return quote_value(
+            amount0_raw,
+            amount1_raw,
+            price,
+            self.token0.decimals,
+            self.token1.decimals,
+            self.quote_is_token1,
+        )
 
     def _capital_budget(
         self, portfolio, price: Decimal, *,
         capital_limit_usd: Decimal | None = None,
     ) -> tuple[int, int]:
         """按本金上限截断后返回本轮可投入的两腿 raw 预算。"""
-        asset_raw = self._balance_raw(portfolio, self.asset)
-        usdc_raw = self._balance_raw(portfolio, self.usdc)
-        asset = Decimal(asset_raw) / (Decimal(10) ** self.asset.decimals)
-        usdc = Decimal(usdc_raw) / (Decimal(10) ** self.usdc.decimals)
-        asset_usd = asset * price
-        available_usd = asset_usd + usdc
+        base_raw = self._balance_raw(portfolio, self.base_token)
+        quote_raw = self._balance_raw(portfolio, self.quote_token)
+        base0, base1 = self._ordered_amounts(base_raw, 0)
+        base_value = self._quote_value(base0, base1, price)
+        available_value = self._quote_value(
+            portfolio.balance0_raw, portfolio.balance1_raw, price
+        )
         if capital_limit_usd is None:
             total_capital_usd, probe_capital_usd = _capital_limits()
-            allowed_usd = self.fact_gate.max_position_usd(
+            allowed_value = self.fact_gate.max_position_usd(
                 total_capital_usd, probe_capital_usd
             )
         else:
-            allowed_usd = capital_limit_usd
-        capital_usd = min(available_usd, allowed_usd)
-        if capital_usd <= 0:
+            allowed_value = capital_limit_usd
+        capital_value = min(available_value, allowed_value)
+        if capital_value <= 0:
             raise ActionError(
                 "可用本金为 0，请先在 config/risk.yaml 设置 "
                 "limits.total_capital_usd"
             )
 
-        deploy_asset_usd = min(asset_usd, capital_usd)
-        if deploy_asset_usd == asset_usd:
-            deploy_asset = asset_raw
+        deploy_base_value = min(base_value, capital_value)
+        if deploy_base_value == base_value:
+            deploy_base = base_raw
         else:
-            deploy_asset = int(
+            base_amount = (
+                deploy_base_value / price
+                if self.base_token is self.token0
+                else deploy_base_value * price
+            )
+            deploy_base = int(
                 (
-                    deploy_asset_usd / price
-                    * (Decimal(10) ** self.asset.decimals)
+                    base_amount * (Decimal(10) ** self.base_token.decimals)
                 ).to_integral_value(rounding=ROUND_FLOOR)
             )
-        deploy_usdc = int(
+        deploy_quote = int(
             (
-                (capital_usd - deploy_asset_usd)
-                * (Decimal(10) ** self.usdc.decimals)
+                (capital_value - deploy_base_value)
+                * (Decimal(10) ** self.quote_token.decimals)
             ).to_integral_value(rounding=ROUND_FLOOR)
         )
-        deploy_asset = min(deploy_asset, asset_raw)
-        deploy_usdc = min(deploy_usdc, usdc_raw)
-        return self._ordered_amounts(deploy_asset, deploy_usdc)
+        deploy_base = min(deploy_base, base_raw)
+        deploy_quote = min(deploy_quote, quote_raw)
+        return self._ordered_amounts(deploy_base, deploy_quote)
 
     def _mint_params(
         self, budget0: int, budget1: int, band, sqrt_price_x96: int,
@@ -199,10 +212,7 @@ class ProductionActions:
         self, budget0: int, budget1: int, price: Decimal,
     ) -> Callable[[str], None]:
         """按 mint 模拟返回的两腿实际数量检查存入总价值。"""
-        budget_usd = (
-            Decimal(budget0) / (Decimal(10) ** self.token0.decimals) * price
-            + Decimal(budget1) / (Decimal(10) ** self.token1.decimals)
-        )
+        budget_usd = self._quote_value(budget0, budget1, price)
         minimum_usd = (
             budget_usd * Decimal(self.mint_min_deposit_bps) / BPS
         )
@@ -221,10 +231,7 @@ class ProductionActions:
                 )
             except Exception as error:
                 raise ActionError(f"mint 模拟返回值无法按 ABI 解码：{error}") from error
-            deposited_usd = (
-                Decimal(amount0) / (Decimal(10) ** self.token0.decimals) * price
-                + Decimal(amount1) / (Decimal(10) ** self.token1.decimals)
-            )
+            deposited_usd = self._quote_value(amount0, amount1, price)
             if deposited_usd < minimum_usd:
                 raise ActionError(
                     f"mint 模拟实际存入 {deposited_usd} USD，"
@@ -310,28 +317,21 @@ class ProductionActions:
             budget0, budget1 = self._capital_budget(
                 portfolio, sample.price
             )
-            asset_amount, usdc_amount = (
-                (budget0, budget1)
-                if self.asset is self.token0 else (budget1, budget0)
-            )
-            capital_limit_usd = (
-                Decimal(asset_amount)
-                / (Decimal(10) ** self.asset.decimals)
-                * sample.price
-                + Decimal(usdc_amount)
-                / (Decimal(10) ** self.usdc.decimals)
+            capital_limit_usd = self._quote_value(
+                budget0, budget1, sample.price
             )
             requirement = calculate_50_50_swap(
                 BalanceSnapshot(
-                    token0=self.asset.address,
-                    token1=self.usdc.address,
-                    amount0_raw=asset_amount,
-                    amount1_raw=usdc_amount,
-                    token0_decimals=self.asset.decimals,
-                    token1_decimals=self.usdc.decimals,
+                    token0=self.token0.address,
+                    token1=self.token1.address,
+                    amount0_raw=budget0,
+                    amount1_raw=budget1,
+                    token0_decimals=self.token0.decimals,
+                    token1_decimals=self.token1.decimals,
                     price_token1_per_token0=sample.price,
                 ),
                 load_min_swap_usd(RISK_PATH),
+                quote_is_token1=self.quote_is_token1,
             )
             if requirement is None:
                 swaps = ()
@@ -345,28 +345,42 @@ class ProductionActions:
                     amount_usd=requirement.amount_usd,
                     slippage_bps=self.swap_policy.max_slippage_bps,
                 )
-            estimated_asset, estimated_usdc = asset_amount, usdc_amount
+            estimated0, estimated1 = budget0, budget1
             if requirement is not None:
                 received = sum(item.quote.amount_out for item in swaps)
-                if requirement.token_in == self.asset.address:
-                    estimated_asset -= requirement.amount_in
-                    estimated_usdc += received
+                if requirement.token_in == self.token0.address:
+                    estimated0 -= requirement.amount_in
+                    estimated1 += received
                 else:
-                    estimated_usdc -= requirement.amount_in
-                    estimated_asset += received
+                    estimated1 -= requirement.amount_in
+                    estimated0 += received
+            estimated_base = (
+                estimated0 if self.base_token is self.token0 else estimated1
+            )
+            estimated_quote = (
+                estimated0 if self.quote_token is self.token0 else estimated1
+            )
             requirements = (
                 (
-                    self.usdc.address, self.swap_router.router_address,
-                    0 if requirement is None or requirement.token_in != self.usdc.address
+                    self.quote_token.address, self.swap_router.router_address,
+                    0 if requirement is None or requirement.token_in != self.quote_token.address
                     else requirement.amount_in,
                 ),
                 (
-                    self.asset.address, self.swap_router.router_address,
-                    0 if requirement is None or requirement.token_in != self.asset.address
+                    self.base_token.address, self.swap_router.router_address,
+                    0 if requirement is None or requirement.token_in != self.base_token.address
                     else requirement.amount_in,
                 ),
-                (self.usdc.address, self.position_manager.address, estimated_usdc),
-                (self.asset.address, self.position_manager.address, estimated_asset),
+                (
+                    self.quote_token.address,
+                    self.position_manager.address,
+                    estimated_quote,
+                ),
+                (
+                    self.base_token.address,
+                    self.position_manager.address,
+                    estimated_base,
+                ),
             )
             approvals = self.approval_manager.plan(self.owner, requirements)
         except ActionError:
@@ -393,9 +407,7 @@ class ProductionActions:
                 )
             else:
                 latest = self._latest_mint_sample(band)
-                budget0, budget1 = self._ordered_amounts(
-                    estimated_asset, estimated_usdc
-                )
+                budget0, budget1 = estimated0, estimated1
                 LOGGER.info("dry-run mint budget 使用 swap 报价估算余额")
             (
                 amount0_desired,
@@ -572,7 +584,7 @@ class ProductionActions:
         )
 
     def exit(self, sample, *, allow_broadcast: bool = False) -> None:
-        """撤出全部流动性，领取资产，清成 USDC 后销毁 NFT。"""
+        """撤出全部流动性，领取资产，清成计价稳定币后销毁 NFT。"""
         broadcast = require_broadcast_flag(allow_broadcast)
         initial = self.reader.read(self.owner, spenders=self._spenders)
         position = self._active_position(initial)
@@ -599,24 +611,18 @@ class ProductionActions:
         self._execute(collect, "collect", broadcast)
 
         after_collect = self.reader.read(self.owner, spenders=self._spenders)
-        asset_balance = self._balance_raw(after_collect, self.asset)
-        if asset_balance > 0:
-            human_asset = Decimal(asset_balance) / (
-                Decimal(10) ** self.asset.decimals
-            )
-            asset_value_usd = (
-                human_asset * sample.price
-                if self.asset is self.token0
-                else human_asset / sample.price
-            )
+        base_balance = self._balance_raw(after_collect, self.base_token)
+        if base_balance > 0:
+            base0, base1 = self._ordered_amounts(base_balance, 0)
+            base_value_usd = self._quote_value(base0, base1, sample.price)
             try:
                 swaps = self.swap_router.plan_exact_input_single(
-                    token_in=self.asset.address,
-                    token_out=self.usdc.address,
+                    token_in=self.base_token.address,
+                    token_out=self.quote_token.address,
                     fee=self.fee,
                     recipient=self.owner,
-                    amount_in=asset_balance,
-                    amount_usd=asset_value_usd,
+                    amount_in=base_balance,
+                    amount_usd=base_value_usd,
                     slippage_bps=self.swap_policy.max_slippage_bps,
                 )
             except Exception as error:
@@ -635,18 +641,19 @@ class ProductionActions:
         if not broadcast:
             return
         completed = self.reader.read(self.owner, spenders=self._spenders)
-        remaining = self._balance_raw(completed, self.asset)
+        remaining = self._balance_raw(completed, self.base_token)
         if remaining == 0:
             return
         if remaining < self.dust_threshold_raw:
             LOGGER.warning(
-                "撤出后仍有 wASMLx 粉尘：raw=%d，阈值=%d",
+                "撤出后仍有 %s 粉尘：raw=%d，阈值=%d",
+                self.base_token.symbol,
                 remaining,
                 self.dust_threshold_raw,
             )
             return
         raise ActionError(
-            "撤出后剩余 wASMLx 敞口："
+            f"撤出后剩余 {self.base_token.symbol} 敞口："
             f"raw={remaining}，dust_threshold_raw={self.dust_threshold_raw}"
         )
 

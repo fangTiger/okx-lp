@@ -21,6 +21,7 @@ pools:
     enabled: true
     uniswap_version: v3
     address: "0x1111111111111111111111111111111111111111"
+    quote_leg: token1
     token0:
       symbol: TEST
       address: "0x2222222222222222222222222222222222222222"
@@ -65,6 +66,42 @@ class ConfigTest(unittest.TestCase):
         config = load_config(Path("config/pools.yaml"))
 
         self.assertGreaterEqual(len(config.chain.rpc_urls), 2)
+
+    def test_quote_leg_selects_quote_and_base_tokens(self):
+        pool = self._load(VALID_CONFIG).find_pool()
+
+        self.assertEqual(pool.quote_leg, "token1")
+        self.assertEqual(pool.quote_token.symbol, "USDC")
+        self.assertEqual(pool.base_token.symbol, "TEST")
+
+    def test_quote_leg_is_required_and_rejects_invalid_values(self):
+        variants = (
+            VALID_CONFIG.replace("    quote_leg: token1\n", ""),
+            VALID_CONFIG.replace("quote_leg: token1", "quote_leg: token2"),
+            VALID_CONFIG.replace("quote_leg: token1", "quote_leg: 1"),
+            VALID_CONFIG.replace("quote_leg: token1", "quote_leg: null"),
+        )
+
+        for content in variants:
+            with self.subTest(content=content):
+                with self.assertRaisesRegex(ConfigError, "quote_leg"):
+                    self._load(content)
+
+    def test_new_pool_can_be_selected_and_default_remains_first_pool(self):
+        config = load_config(Path("config/pools.yaml"))
+
+        self.assertEqual(config.find_pool().pool_id, "wASMLx_USDC")
+        pool = config.find_pool("wMRNAx_USDG")
+        self.assertEqual(
+            pool.token0.address,
+            "0x4ae46a509f6b1d9056937ba4500cb143933d2dc8",
+        )
+        self.assertEqual(
+            pool.token1.address,
+            "0xce0fbc16e820ab7fd6d2936f1533c2654ad49ae9",
+        )
+        self.assertEqual(pool.quote_token.symbol, "USDG")
+        self.assertEqual(pool.base_token.symbol, "wMRNAx")
 
     def test_actual_risk_config_contains_time_confirmation_thresholds(self):
         data = yaml.safe_load(Path("config/risk.yaml").read_text(encoding="utf-8"))

@@ -12,6 +12,8 @@ addresses:
   weth9: "0xe538905cf8410324e03a5a23c1c177a474d59b2b"
   wasmlx: "0x9147b03c16b18fc4f686f610f189f91ddf4347b4"
   usdc: "0xb6ceceab302e2e4948951ee7843fc24e92933061"
+  usdg: "0x4ae46a509f6b1d9056937ba4500cb143933d2dc8"
+  wmrnax: "0xce0fbc16e820ab7fd6d2936f1533c2654ad49ae9"
 
 # 0.02 gwei 为实测常态；上限偏离常态 50 倍时失败关闭，不盲目追价。
 gas:
@@ -29,6 +31,8 @@ approval:
   max_amount_raw:
     "0x9147b03c16b18fc4f686f610f189f91ddf4347b4": "100000000000000000000"   # 100 wASMLx（18 位）
     "0xb6ceceab302e2e4948951ee7843fc24e92933061": "200000000000"            # 200,000 USDC（6 位）
+    "0x4ae46a509f6b1d9056937ba4500cb143933d2dc8": "200000000000"            # 200,000 USDG（6 位）
+    "0xce0fbc16e820ab7fd6d2936f1533c2654ad49ae9": "5000000000000000000000" # 5,000 wMRNAx（18 位）
 
 # 选择器必须绑定具体目标；QuoterV2 是只读 eth_call，不进入签名白名单。
 whitelist:
@@ -50,5 +54,13 @@ whitelist:
         approve: "0x095ea7b3"
     usdc:
       address: "0xb6ceceab302e2e4948951ee7843fc24e92933061"
+      selectors:
+        approve: "0x095ea7b3"
+    usdg:
+      address: "0x4ae46a509f6b1d9056937ba4500cb143933d2dc8"
+      selectors:
+        approve: "0x095ea7b3"
+    wmrnax:
+      address: "0xce0fbc16e820ab7fd6d2936f1533c2654ad49ae9"
       selectors:
         approve: "0x095ea7b3"

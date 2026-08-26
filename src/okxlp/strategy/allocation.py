@@ -59,30 +59,61 @@ def load_min_swap_usd(path: Path = Path("config/risk.yaml")) -> Decimal:
 def calculate_50_50_swap(
     snapshot: BalanceSnapshot,
     min_swap_usd: Decimal | str = DEFAULT_MIN_SWAP_USD,
+    *, quote_is_token1: bool = True,
 ) -> SwapRequirement | None:
-    """统一计算两腿差额，小于最小金额时忽略粉尘。"""
+    """以计价腿金额计算两腿差额，小于最小金额时忽略粉尘。"""
     values = (snapshot.amount0_raw, snapshot.amount1_raw)
     decimals = (snapshot.token0_decimals, snapshot.token1_decimals)
     if any(type(value) is not int or value < 0 for value in values):
         raise ValueError("两腿原始余额必须是非负整数")
     if any(type(value) is not int or value < 0 for value in decimals):
         raise ValueError("代币 decimals 必须是非负整数")
+    if type(quote_is_token1) is not bool:
+        raise ValueError("quote_is_token1 必须是布尔值")
     price = _positive_decimal(snapshot.price_token1_per_token0, "池价")
     threshold = validate_min_swap_usd(min_swap_usd)
     amount0 = Decimal(snapshot.amount0_raw) / (Decimal(10) ** snapshot.token0_decimals)
     amount1 = Decimal(snapshot.amount1_raw) / (Decimal(10) ** snapshot.token1_decimals)
-    token0_value = amount0 * price
-    delta = token0_value - (token0_value + amount1) / Decimal(2)
+    token0_value = amount0 * price if quote_is_token1 else amount0
+    token1_value = amount1 if quote_is_token1 else amount1 / price
+    delta = token0_value - (token0_value + token1_value) / Decimal(2)
     amount_usd = abs(delta)
     if amount_usd < threshold:
         return None
     if delta > 0:
-        raw = _raw_amount(delta / price, snapshot.token0_decimals)
+        amount0_in = delta / price if quote_is_token1 else delta
+        raw = _raw_amount(amount0_in, snapshot.token0_decimals)
         result = SwapRequirement(snapshot.token0, snapshot.token1, raw, amount_usd)
     else:
-        raw = _raw_amount(-delta, snapshot.token1_decimals)
+        amount1_in = -delta if quote_is_token1 else -delta * price
+        raw = _raw_amount(amount1_in, snapshot.token1_decimals)
         result = SwapRequirement(snapshot.token1, snapshot.token0, raw, amount_usd)
     return None if result.amount_in == 0 else result
+
+
+def quote_value(
+    amount0_raw: int,
+    amount1_raw: int,
+    price: Decimal | str,
+    token0_decimals: int,
+    token1_decimals: int,
+    quote_is_token1: bool,
+) -> Decimal:
+    """把两腿余额折算为计价腿单位的总价值。"""
+    amounts = (amount0_raw, amount1_raw)
+    decimals = (token0_decimals, token1_decimals)
+    if any(type(value) is not int or value < 0 for value in amounts):
+        raise ValueError("两腿原始余额必须是非负整数")
+    if any(type(value) is not int or value < 0 for value in decimals):
+        raise ValueError("代币 decimals 必须是非负整数")
+    if type(quote_is_token1) is not bool:
+        raise ValueError("quote_is_token1 必须是布尔值")
+    selected_price = _positive_decimal(price, "池价")
+    amount0 = Decimal(amount0_raw) / (Decimal(10) ** token0_decimals)
+    amount1 = Decimal(amount1_raw) / (Decimal(10) ** token1_decimals)
+    if quote_is_token1:
+        return amount0 * selected_price + amount1
+    return amount0 + amount1 / selected_price
 
 
 def validate_min_swap_usd(value: Any) -> Decimal:

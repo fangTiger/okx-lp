@@ -7,6 +7,7 @@ from eth_abi import decode, encode
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from okxlp.strategy.allocation import BalanceSnapshot, calculate_50_50_swap
 from okxlp.uniswap.swap import SwapPolicy, SwapRouter
 
 
@@ -157,6 +158,49 @@ class SwapRouterTest(unittest.TestCase):
         self.assertEqual(sum(item.quote.amount_in for item in plan), 500_000_002)
         self.assertEqual([item.delay_seconds for item in plan], [0, 20, 20])
         self.assertEqual(len(self.rpc.calls), 3)
+
+    def test_split_threshold_uses_quote_units_for_both_pool_orders(self):
+        asset = TOKEN_OUT
+        quote = TOKEN_IN
+        price = Decimal("1747")
+        inverse = Decimal(1) / price
+
+        for quote_balance, expected_parts in ((1200, 3), (800, 1)):
+            mirrored = (
+                calculate_50_50_swap(
+                    BalanceSnapshot(
+                        asset, quote, 0, quote_balance * 10**6,
+                        18, 6, price,
+                    ),
+                    quote_is_token1=True,
+                ),
+                calculate_50_50_swap(
+                    BalanceSnapshot(
+                        quote, asset, quote_balance * 10**6, 0,
+                        6, 18, inverse,
+                    ),
+                    quote_is_token1=False,
+                ),
+            )
+            with self.subTest(
+                quote_balance=quote_balance, expected_parts=expected_parts
+            ):
+                self.assertEqual(mirrored[0].amount_usd, mirrored[1].amount_usd)
+                plans = tuple(
+                    self.router.plan_exact_input_single(
+                        token_in=requirement.token_in,
+                        token_out=requirement.token_out,
+                        fee=500,
+                        recipient=RECIPIENT,
+                        amount_in=requirement.amount_in,
+                        amount_usd=requirement.amount_usd,
+                    )
+                    for requirement in mirrored
+                )
+                self.assertEqual(
+                    tuple(len(plan) for plan in plans),
+                    (expected_parts, expected_parts),
+                )
 
     def test_split_plan_uses_first_preallocated_intent_ids(self):
         intent_ids = tuple(f"{index:032x}" for index in range(1, 6))

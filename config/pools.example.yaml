@@ -25,6 +25,7 @@ pools:
     enabled: false
     uniswap_version: v3         # v3 | v4，以官方清单为准
     address: "0x..."            # [待核实 F1]
+    quote_leg: token1           # token0 | token1，显式声明计价稳定币
     token0: { symbol: TSLAx, address: "0x...", decimals: 18 }  # [待核实 F7]
     token1: { symbol: USDC,  address: "0x...", decimals: 6 }   # [待核实 F7]
     fee_bps: 30

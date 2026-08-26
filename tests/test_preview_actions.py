@@ -19,6 +19,16 @@ def load_tool():
 
 
 class PreviewActionsToolTest(unittest.TestCase):
+    def test_pool_id_is_optional_and_selectable(self):
+        tool = load_tool()
+        base = ["--owner", OWNER, "--action", "enter"]
+
+        self.assertIsNone(tool.build_parser().parse_args(base).pool_id)
+        selected = tool.build_parser().parse_args(
+            [*base, "--pool-id", "wMRNAx_USDG"]
+        )
+        self.assertEqual(selected.pool_id, "wMRNAx_USDG")
+
     def test_owner_and_action_are_required(self):
         tool = load_tool()
         for arguments in ([], ["--owner", OWNER], ["--action", "exit"]):

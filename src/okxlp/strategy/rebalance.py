@@ -154,7 +154,10 @@ class RebalanceOrchestrator:
         sleep: Callable[[float], None] = time.sleep,
         min_swap_usd: Decimal | str | None = None,
         risk_path: Path = Path("config/risk.yaml"),
+        quote_is_token1: bool = True,
     ) -> None:
+        if type(quote_is_token1) is not bool:
+            raise ValueError("quote_is_token1 必须是布尔值")
         self.executor = executor
         self.journal = journal
         self.sleep = sleep
@@ -162,6 +165,7 @@ class RebalanceOrchestrator:
             load_min_swap_usd(risk_path)
             if min_swap_usd is None else validate_min_swap_usd(min_swap_usd)
         )
+        self.quote_is_token1 = quote_is_token1
 
     def execute(
         self, actions: RebalanceActions, *, allow_broadcast: bool = False,
@@ -197,7 +201,8 @@ class RebalanceOrchestrator:
             stage = "swap"
             if not self._completed(progress, stage):
                 requirement = calculate_50_50_swap(
-                    actions.read_balances(), self.min_swap_usd
+                    actions.read_balances(), self.min_swap_usd,
+                    quote_is_token1=self.quote_is_token1,
                 )
                 intent_ids = tuple(
                     deterministic_intent_id(selected_id, stage, index)

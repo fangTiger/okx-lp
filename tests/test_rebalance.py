@@ -3,12 +3,14 @@ import sys
 import tempfile
 import unittest
 from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from okxlp.exec.intent import ID_PATTERN, Intent, IntentStatus
+from okxlp.strategy.allocation import quote_value
 from okxlp.strategy.rebalance import (
     BalanceSnapshot,
     RebalanceActions,
@@ -61,6 +63,54 @@ class RecordingExecutor:
 
 
 class RebalanceTest(unittest.TestCase):
+    def test_quote_value_is_invariant_when_pool_token_order_is_mirrored(self):
+        price = Decimal("1747")
+        inverse = Decimal(1) / price
+
+        quote_token1 = quote_value(
+            2 * 10**18, 500 * 10**6, price, 18, 6,
+            quote_is_token1=True,
+        )
+        quote_token0 = quote_value(
+            500 * 10**6, 2 * 10**18, inverse, 6, 18,
+            quote_is_token1=False,
+        )
+
+        self.assertLessEqual(abs(quote_token1 - quote_token0), Decimal("0.000001"))
+
+    def test_50_50_swap_is_economically_invariant_for_mirrored_order(self):
+        price = Decimal("1747")
+        inverse = Decimal(1) / price
+        asset = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        quote = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+        quote_token1 = calculate_50_50_swap(
+            BalanceSnapshot(
+                asset, quote, 2 * 10**18, 500 * 10**6, 18, 6, price,
+            ),
+            quote_is_token1=True,
+        )
+        quote_token0 = calculate_50_50_swap(
+            BalanceSnapshot(
+                quote, asset, 500 * 10**6, 2 * 10**18, 6, 18, inverse,
+            ),
+            quote_is_token1=False,
+        )
+
+        self.assertEqual(
+            (quote_token1.token_in, quote_token1.token_out), (asset, quote)
+        )
+        self.assertEqual(
+            (quote_token0.token_in, quote_token0.token_out), (asset, quote)
+        )
+        self.assertLessEqual(
+            abs(quote_token1.amount_usd - quote_token0.amount_usd),
+            Decimal("0.000001"),
+        )
+        self.assertLessEqual(
+            abs(quote_token1.amount_in - quote_token0.amount_in), 1
+        )
+
     def test_journal_load_returns_none_for_missing_file(self):
         with tempfile.TemporaryDirectory() as directory:
             journal = RebalanceJournal(Path(directory))
@@ -152,6 +202,34 @@ class RebalanceTest(unittest.TestCase):
         )
         self.assertEqual(progress.completed, ("burn", "collect", "swap", "mint"))
         self.assertIsNone(progress.failed_stage)
+
+    def test_orchestrator_forwards_reversed_quote_leg_to_allocation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events = []
+            captured = []
+            actions = replace(
+                self._actions(events),
+                read_balances=lambda: BalanceSnapshot(
+                    TOKEN0, TOKEN1, 1200 * 10**6, 0,
+                    6, 18, Decimal(1) / Decimal("1747"),
+                ),
+                build_swap=lambda requirement, _intent_ids: (
+                    captured.append(requirement) or ()
+                ),
+            )
+            orchestrator = RebalanceOrchestrator(
+                executor=RecordingExecutor(events),
+                journal=RebalanceJournal(Path(directory)),
+                sleep=lambda _seconds: None,
+                quote_is_token1=False,
+            )
+
+            orchestrator.execute(actions, rebalance_id="reverse-quote")
+
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0].token_in, TOKEN0)
+        self.assertEqual(captured[0].token_out, TOKEN1)
+        self.assertEqual(captured[0].amount_usd, Decimal("600"))
 
     def test_mint_stage_passes_its_simulation_check_to_executor(self):
         with tempfile.TemporaryDirectory() as directory:

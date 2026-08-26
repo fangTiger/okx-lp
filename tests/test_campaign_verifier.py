@@ -21,8 +21,12 @@ from okxlp.exec.authorization import AuthorizationError, RunMode, load_run_mode
 from okxlp.uniswap.pool import PoolSnapshot, TokenMetadata
 
 
-def make_snapshot(config, *, fee=500, token1_decimals=6):
-    pool = config.pools[0]
+def make_snapshot(config, *, pool_index=0, fee=500, token1_decimals=None):
+    pool = config.pools[pool_index]
+    selected_token1_decimals = (
+        pool.token1.decimals
+        if token1_decimals is None else token1_decimals
+    )
     return PoolSnapshot(
         block=68886709,
         address=pool.address,
@@ -32,8 +36,15 @@ def make_snapshot(config, *, fee=500, token1_decimals=6):
         sqrt_price_x96=3333962123355733730549486,
         tick=-201526,
         active_liquidity=14942241291635132,
-        token0=TokenMetadata(pool.token0.address, "wASMLx", "Wrapped ASML xStock", 18, 0),
-        token1=TokenMetadata(pool.token1.address, "USDC", "USDC", token1_decimals, 0),
+        token0=TokenMetadata(
+            pool.token0.address, pool.token0.symbol,
+            pool.token0.name or pool.token0.symbol, pool.token0.decimals, 0,
+        ),
+        token1=TokenMetadata(
+            pool.token1.address, pool.token1.symbol,
+            pool.token1.name or pool.token1.symbol,
+            selected_token1_decimals, 0,
+        ),
     )
 
 
@@ -63,16 +74,26 @@ class CampaignVerifierTest(unittest.TestCase):
         self.config = load_config(Path("config/pools.yaml"))
 
     def _verify(self, config, snapshot, rpc=None):
+        snapshots = {
+            pool.address: make_snapshot(config, pool_index=index)
+            for index, pool in enumerate(config.pools)
+        }
+        if isinstance(snapshot, dict):
+            snapshots.update(snapshot)
+        else:
+            snapshots[config.pools[0].address] = snapshot
         return verify_campaign(
             config,
             rpc or FakeRpc(),
-            pool_factory=lambda _rpc, _address: FakePool(snapshot),
+            pool_factory=lambda _rpc, address: FakePool(snapshots[address]),
         )
 
     def test_matching_chain_values_pass(self):
         report = self._verify(self.config, make_snapshot(self.config))
 
-        self.assertEqual(report.verified_pool_ids, ("wASMLx_USDC",))
+        self.assertEqual(
+            report.verified_pool_ids, ("wASMLx_USDC", "wMRNAx_USDG")
+        )
         self.assertEqual(report.block, 68886709)
 
     def test_wrong_fee_lists_configuration_and_chain_values(self):

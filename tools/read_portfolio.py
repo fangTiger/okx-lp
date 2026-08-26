@@ -26,6 +26,9 @@ def build_parser() -> argparse.ArgumentParser:
     """构造仅接收 owner 的只读命令行参数。"""
     parser = argparse.ArgumentParser(description="读取账户链上 LP 头寸与授权")
     parser.add_argument("--owner", required=True, help="需要读取的 EVM 地址")
+    parser.add_argument(
+        "--pool-id", help="目标池配置 ID；缺省使用首个池"
+    )
     return parser
 
 
@@ -112,7 +115,7 @@ def main(argv: list[str] | None = None) -> None:
     """执行一次固定区块的只读账户检查并打印结果。"""
     args = build_parser().parse_args(argv)
     config = load_config(POOLS_CONFIG_PATH)
-    pool = config.find_pool()
+    pool = config.find_pool(args.pool_id)
     npm_address, router_address = _load_execution_addresses(EXECUTION_CONFIG_PATH)
     rpc = JsonRpcClient(config.chain.rpc_urls, chain_id=config.chain.chain_id)
     fee = int(pool.fee_bps * 100)

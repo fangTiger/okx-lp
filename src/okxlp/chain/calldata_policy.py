@@ -13,6 +13,7 @@ from typing import Any
 import yaml
 from eth_abi import decode
 
+from okxlp.config import load_config
 from okxlp.config_validation import ConfigError, address as validate_address
 
 
@@ -129,16 +130,12 @@ class CalldataPolicy:
     @classmethod
     def from_config(
         cls, execution_path: Path, pools_path: Path, *, executor_address: str,
-        allowed_token_ids: Any,
+        allowed_token_ids: Any, pool_id: str | None = None,
     ) -> "CalldataPolicy":
         """从执行配置和匹配的池配置严格构造参数策略。"""
         execution = _read_mapping(execution_path, "执行配置")
         addresses = _mapping(
             _required(execution, "addresses", "执行配置"), "execution.addresses"
-        )
-        pool_address = _address(
-            _required(addresses, "pool", "execution.addresses"),
-            "execution.addresses.pool",
         )
         npm_address = _required(addresses, "npm", "execution.addresses")
         router_address = _required(
@@ -151,62 +148,51 @@ class CalldataPolicy:
             _required(approval, "max_amount_raw", "execution.approval"),
             "execution.approval.max_amount_raw",
         )
-        approval_limits = {
-            token: int(amount)
-            if type(amount) is str and re.fullmatch(r"[0-9]+", amount)
-            else amount
-            for token, amount in raw_limits.items()
-        }
+        approval_limits = {}
+        for raw_token, amount in raw_limits.items():
+            token = _address(raw_token, "execution.approval.max_amount_raw 的键")
+            if token in approval_limits:
+                raise CalldataPolicyError(
+                    f"execution.approval.max_amount_raw 包含重复代币：{token}"
+                )
+            approval_limits[token] = (
+                int(amount)
+                if type(amount) is str and re.fullmatch(r"[0-9]+", amount)
+                else amount
+            )
 
-        root = _read_mapping(pools_path, "池配置")
-        pools = _required(root, "pools", "池配置")
-        if type(pools) is not list or not pools:
-            raise CalldataPolicyError("pools 必须是非空列表")
-        selected = None
-        for index, raw in enumerate(pools):
-            pool = _mapping(raw, f"pools[{index}]")
-            candidate = _address(
-                _required(pool, "address", f"pools[{index}]"),
-                f"pools[{index}].address",
-            )
-            if candidate == pool_address:
-                selected = (index, pool)
-                break
-        if selected is None:
-            raise CalldataPolicyError(
-                f"池配置中找不到 execution.addresses.pool={pool_address}"
-            )
-        index, pool = selected
-        token0 = _mapping(
-            _required(pool, "token0", f"pools[{index}]"), f"pools[{index}].token0"
-        )
-        token1 = _mapping(
-            _required(pool, "token1", f"pools[{index}]"), f"pools[{index}].token1"
-        )
-        raw_fee = _required(pool, "fee_bps", f"pools[{index}]")
-        if type(raw_fee) not in (int, float):
-            raise CalldataPolicyError(
-                f"pools[{index}].fee_bps 必须是数值，实际值={raw_fee}"
-            )
         try:
-            fee_units = Decimal(str(raw_fee)) * Decimal(100)
+            pool = load_config(pools_path).find_pool(pool_id)
+        except ConfigError as error:
+            raise CalldataPolicyError(str(error)) from None
+        selected_tokens = (pool.token0.address, pool.token1.address)
+        try:
+            selected_limits = {
+                token: approval_limits[token] for token in selected_tokens
+            }
+        except KeyError as error:
+            raise CalldataPolicyError(
+                f"execution.approval.max_amount_raw 缺少所选池代币：{error.args[0]}"
+            ) from None
+        try:
+            fee_units = Decimal(str(pool.fee_bps)) * Decimal(100)
         except InvalidOperation:
             raise CalldataPolicyError(
-                f"pools[{index}].fee_bps 不是有效数值，实际值={raw_fee}"
+                f"池 {pool.pool_id} 的 fee_bps 不是有效数值：{pool.fee_bps}"
             ) from None
         if fee_units != fee_units.to_integral_value():
             raise CalldataPolicyError(
-                f"pools[{index}].fee_bps 无法精确换算为 fee，实际值={raw_fee}"
+                f"池 {pool.pool_id} 的 fee_bps 无法精确换算为 fee：{pool.fee_bps}"
             )
         return cls(
             executor_address=executor_address,
             npm_address=npm_address,
             router_address=router_address,
-            token0=_required(token0, "address", f"pools[{index}].token0"),
-            token1=_required(token1, "address", f"pools[{index}].token1"),
+            token0=pool.token0.address,
+            token1=pool.token1.address,
             fee=int(fee_units),
             allowed_token_ids=frozenset(allowed_token_ids),
-            max_approval_raw=approval_limits,
+            max_approval_raw=selected_limits,
         )
 
     def validate(

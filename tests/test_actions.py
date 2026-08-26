@@ -10,7 +10,7 @@ from okxlp.exec.approval import ApprovalPlan
 from okxlp.exec.executor import ExecutionResult
 from okxlp.exec.intent import Intent, IntentStatus
 from okxlp.strategy.actions import ActionError, ProductionActions
-from okxlp.strategy.allocation import calculate_50_50_swap
+from okxlp.strategy.allocation import calculate_50_50_swap, quote_value
 from okxlp.strategy.machine_state import PriceBand
 from okxlp.strategy.machine_types import MarketSample
 from okxlp.uniswap.portfolio import OwnedPosition, PortfolioSnapshot
@@ -63,9 +63,14 @@ INCIDENT_BAND = PriceBand(
     Decimal("1746"),
     Decimal("1766"),
 )
+BASE_TOKEN = SimpleNamespace(address=TOKEN0, symbol="wASMLx", decimals=18)
+QUOTE_TOKEN = SimpleNamespace(address=TOKEN1, symbol="USDC", decimals=6)
 POOL = SimpleNamespace(
-    token0=SimpleNamespace(address=TOKEN0, symbol="wASMLx", decimals=18),
-    token1=SimpleNamespace(address=TOKEN1, symbol="USDC", decimals=6),
+    token0=BASE_TOKEN,
+    token1=QUOTE_TOKEN,
+    quote_leg="token1",
+    quote_token=QUOTE_TOKEN,
+    base_token=BASE_TOKEN,
     fee_bps=Decimal("5"),
     tick_spacing=10,
 )
@@ -204,7 +209,7 @@ class RecordingExecutor:
 def make_actions(
     *, reader=None, fact_limit=Decimal("100"), executor=None,
     approval_manager=None, position_manager=None, swap_router=None,
-    dust_threshold_raw=10**12, pool_snapshot_reader=None,
+    dust_threshold_raw=10**12, pool_snapshot_reader=None, pool=POOL,
 ):
     dependencies = SimpleNamespace(
         reader=reader or SequenceReader(),
@@ -221,7 +226,7 @@ def make_actions(
         position_manager=dependencies.position_manager,
         swap_router=dependencies.swap_router,
         owner=OWNER,
-        pool=POOL,
+        pool=pool,
         fact_gate=dependencies.fact_gate,
         swap_policy=SwapPolicy(max_slippage_bps=Decimal("30")),
         deadline_seconds=300,
@@ -952,6 +957,40 @@ class ProductionRebalanceActionsTest(unittest.TestCase):
             + Decimal(budget1) / Decimal(10**6)
         )
         self.assertLessEqual(budget0, portfolio.balance0_raw)
+        self.assertLessEqual(value, Decimal("50"))
+        self.assertLessEqual(Decimal("50") - value, Decimal("0.000001"))
+
+    def test_reversed_real_pool_capital_budget_is_fifty_quote_units(self):
+        usdg = SimpleNamespace(
+            address="0x4ae46a509f6b1d9056937ba4500cb143933d2dc8",
+            symbol="USDG",
+            decimals=6,
+        )
+        wmrnax = SimpleNamespace(
+            address="0xce0fbc16e820ab7fd6d2936f1533c2654ad49ae9",
+            symbol="wMRNAx",
+            decimals=18,
+        )
+        pool = SimpleNamespace(
+            token0=usdg,
+            token1=wmrnax,
+            quote_leg="token0",
+            quote_token=usdg,
+            base_token=wmrnax,
+            fee_bps=Decimal("5"),
+            tick_spacing=10,
+        )
+        price = Decimal("0.0068512781")
+        portfolio = snapshot(balance0=200 * 10**6, balance1=0)
+        actions, _dependencies = make_actions(pool=pool)
+
+        budget0, budget1 = actions._capital_budget(
+            portfolio, price, capital_limit_usd=Decimal("50")
+        )
+        value = quote_value(
+            budget0, budget1, price, 6, 18, quote_is_token1=False
+        )
+
         self.assertLessEqual(value, Decimal("50"))
         self.assertLessEqual(Decimal("50") - value, Decimal("0.000001"))
 

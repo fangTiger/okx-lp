@@ -34,6 +34,7 @@ from okxlp.exec.intent import IntentStatus, IntentStore
 from okxlp.exec.reconcile import reconcile_on_startup
 from okxlp.market.sessions import MarketSessions
 from okxlp.strategy.actions import ProductionActions
+from okxlp.strategy.allocation import quote_value
 from okxlp.strategy.machine import MainStateMachine
 from okxlp.strategy.machine_journal import TransitionJournal
 from okxlp.strategy.machine_state import (
@@ -84,6 +85,28 @@ class ExecutionAddresses:
     npm: str
     router: str
     quoter: str
+
+
+@dataclass(frozen=True)
+class RuntimePaths:
+    """单池生产运行的全部持久化路径。"""
+
+    machine_state: Path
+    transition_journal: Path
+    rebalance_journal: Path
+    rebalance_counter: Path
+    nav_root: Path
+
+
+def _runtime_paths(pool_id: str, root: Path = Path("log")) -> RuntimePaths:
+    """按池 ID 隔离状态、再平衡记录、计数与 NAV。"""
+    return RuntimePaths(
+        machine_state=root / f"machine_state_{pool_id}.json",
+        transition_journal=root / f"machine_{pool_id}.jsonl",
+        rebalance_journal=root / "rebalances" / pool_id,
+        rebalance_counter=root / f"rebalance_count_{pool_id}.json",
+        nav_root=root / "nav" / pool_id,
+    )
 
 
 def load_risk_settings(path: Path = RISK_PATH) -> RiskSettings:
@@ -149,14 +172,18 @@ class PoolMarket:
         )
 
 
-def _usdc_value(pool, amount0: int, amount1: int, price: Decimal) -> Decimal:
-    human0 = Decimal(amount0) / (Decimal(10) ** pool.token0.decimals)
-    human1 = Decimal(amount1) / (Decimal(10) ** pool.token1.decimals)
-    if pool.token1.symbol.upper() == "USDC":
-        return human0 * price + human1
-    if pool.token0.symbol.upper() == "USDC":
-        return human0 + human1 / price
-    raise ValueError("目标池必须恰好包含一腿 USDC")
+def _pool_quote_value(
+    pool, amount0: int, amount1: int, price: Decimal
+) -> Decimal:
+    """把池的两腿金额统一折算为显式计价腿单位。"""
+    return quote_value(
+        amount0,
+        amount1,
+        price,
+        pool.token0.decimals,
+        pool.token1.decimals,
+        pool.quote_leg == "token1",
+    )
 
 
 def _nav_snapshot(rpc, reader, pool, owner, spenders) -> tuple[NavSnapshot, Any]:
@@ -171,8 +198,10 @@ def _nav_snapshot(rpc, reader, pool, owner, spenders) -> tuple[NavSnapshot, Any]
         )
         position0 += amount0
         position1 += amount1
-    position_value = _usdc_value(pool, position0, position1, sample.price)
-    idle_value = _usdc_value(
+    position_value = _pool_quote_value(
+        pool, position0, position1, sample.price
+    )
+    idle_value = _pool_quote_value(
         pool, portfolio.balance0_raw, portfolio.balance1_raw, sample.price
     )
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -252,13 +281,8 @@ def _approval_requirements(policy, pool, result, decision) -> tuple:
         )
     if not decision.allow_exit or result.active_position is None:
         return ()
-    if pool.token0.symbol.upper() == "USDC":
-        asset = policy.token1
-    elif pool.token1.symbol.upper() == "USDC":
-        asset = policy.token0
-    else:
-        raise ValueError("仅允许撤出时无法识别 USDC 交易对")
-    return ((asset, policy.router_address, policy.max_approval_raw[asset]),)
+    base = pool.base_token.address
+    return ((base, policy.router_address, policy.max_approval_raw[base]),)
 
 
 class LiveBootstrap:
@@ -283,10 +307,11 @@ class LiveBootstrap:
     def finish(self, *, allow_broadcast: bool) -> LiveRuntime:
         """执行受同一广播门控保护的授权，再组装主状态机。"""
         broadcast = require_broadcast_flag(allow_broadcast)
+        paths = _runtime_paths(self.pool.pool_id)
         risk_gate = ProductionRiskGate(
             halt_file=self.settings.halt_file,
             fact_gate=self.fact_gate,
-            counter=RebalanceCounter(),
+            counter=RebalanceCounter(paths.rebalance_counter),
             max_rebalances_per_day=self.settings.max_rebalances_per_day,
         )
         decision = _ensure_startup_write_allowed(risk_gate, broadcast)
@@ -329,14 +354,14 @@ class LiveBootstrap:
                 self.rpc, self.pool, self.rpc.block_number()
             ),
         )
-        state_store = MachineStateStore(
-            Path("log") / f"machine_state_{self.pool.pool_id}.json"
-        )
+        state_store = MachineStateStore(paths.machine_state)
         _sync_machine_state(
             state_store, self.result.active_position, self.pool
         )
         rebalancer = RebalanceOrchestrator(
-            executor=self.executor, journal=RebalanceJournal()
+            executor=self.executor,
+            journal=RebalanceJournal(paths.rebalance_journal),
+            quote_is_token1=self.pool.quote_leg == "token1",
         )
         machine = MainStateMachine(
             pool_id=self.pool.pool_id,
@@ -348,9 +373,7 @@ class LiveBootstrap:
                 pin_timeout=self.settings.pin_timeout,
             ),
             state_store=state_store,
-            transition_journal=TransitionJournal(
-                Path("log") / f"machine_{self.pool.pool_id}.jsonl"
-            ),
+            transition_journal=TransitionJournal(paths.transition_journal),
             tick_spacing=self.pool.tick_spacing,
             token0_decimals=self.pool.token0.decimals,
             token1_decimals=self.pool.token1.decimals,
@@ -360,7 +383,8 @@ class LiveBootstrap:
             reader=self.reader, rpc=self.rpc, pool=self.pool,
             owner=self.result.snapshot.owner,
             spenders=(self.addresses.npm, self.addresses.router),
-            nav_recorder=NavRecorder(), token_ids=self.result.token_ids,
+            nav_recorder=NavRecorder(paths.nav_root),
+            token_ids=self.result.token_ids,
             printer=self.printer,
         )
 
@@ -467,7 +491,7 @@ def create_bootstrap(
 ) -> LiveBootstrap:
     """按校验、对账、策略、签名的固定顺序准备生产资源。"""
     config = load_config(POOLS_PATH)
-    pool = config.find_pool()
+    pool = config.find_pool(args.pool_id)
     sessions = _market_sessions(args, pool)
     rpc = JsonRpcClient(
         config.chain.rpc_urls,
@@ -496,6 +520,7 @@ def create_bootstrap(
         EXECUTION_PATH, POOLS_PATH,
         executor_address=args.owner,
         allowed_token_ids=result.token_ids,
+        pool_id=args.pool_id,
     )
     signer: RemoteSigner | None = None
     try:
@@ -541,6 +566,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="X Layer LP 生产状态机入口（默认不广播）"
     )
     parser.add_argument("--owner", required=True, help="生产钱包地址")
+    parser.add_argument(
+        "--pool-id", help="目标池配置 ID；缺省使用首个池"
+    )
     key_source = parser.add_mutually_exclusive_group()
     key_source.add_argument(
         "--keystore", type=Path,

@@ -13,6 +13,8 @@ NPM = "0x315e413a11ab0df498ef83873012430ca36638ae"
 ROUTER = "0x4f0c28f5926afda16bf2506d5d9e57ea190f9bca"
 TOKEN0 = "0x9147b03c16b18fc4f686f610f189f91ddf4347b4"
 TOKEN1 = "0xb6ceceab302e2e4948951ee7843fc24e92933061"
+USDG = "0x4ae46a509f6b1d9056937ba4500cb143933d2dc8"
+WMRNAX = "0xce0fbc16e820ab7fd6d2936f1533c2654ad49ae9"
 EXECUTOR = "0x1111111111111111111111111111111111111111"
 POOL = "0xc3d659028117f1ae5db9b9c68239b4a71f03ef37"
 ATTACKER = "0x9999999999999999999999999999999999999999"
@@ -126,6 +128,47 @@ class CalldataPolicyTest(unittest.TestCase):
         self.assertEqual(policy.fee, 500)
         self.assertEqual(policy.allowed_token_ids, frozenset({TOKEN_ID}))
         self.assertEqual(dict(policy.max_approval_raw), MAX_APPROVALS)
+
+    def test_from_config_selects_new_pool_and_enforces_finite_approvals(self):
+        policy = CalldataPolicy.from_config(
+            Path("config/execution.yaml"), Path("config/pools.yaml"),
+            executor_address=EXECUTOR,
+            allowed_token_ids={TOKEN_ID},
+            pool_id="wMRNAx_USDG",
+        )
+
+        self.assertEqual(policy.token0, USDG)
+        self.assertEqual(policy.token1, WMRNAX)
+        self.assertEqual(
+            dict(policy.max_approval_raw),
+            {USDG: 200_000 * 10**6, WMRNAX: 5_000 * 10**18},
+        )
+        valid_calls = (
+            (USDG, NPM, policy.max_approval_raw[USDG]),
+            (WMRNAX, ROUTER, policy.max_approval_raw[WMRNAX]),
+        )
+        for target, spender, amount in valid_calls:
+            policy.validate(
+                target=target,
+                calldata=calldata(
+                    "0x095ea7b3", "(address,uint256)", (spender, amount)
+                ),
+                value=0,
+                now_ts=NOW,
+            )
+
+        for spender, amount in ((ATTACKER, 1), (NPM, 2**256 - 1)):
+            with self.subTest(spender=spender, amount=amount):
+                with self.assertRaises(CalldataPolicyError):
+                    policy.validate(
+                        target=USDG,
+                        calldata=calldata(
+                            "0x095ea7b3", "(address,uint256)",
+                            (spender, amount),
+                        ),
+                        value=0,
+                        now_ts=NOW,
+                    )
 
     def test_from_config_rejects_missing_approval_section(self):
         with tempfile.TemporaryDirectory() as directory:

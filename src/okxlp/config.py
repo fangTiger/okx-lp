@@ -56,12 +56,23 @@ class PoolConfig:
     uniswap_version: str
     address: str
     factory: str | None
+    quote_leg: str
     token0: TokenConfig
     token1: TokenConfig
     fee_bps: Decimal
     tick_spacing: int
     underlying: str
     listings: tuple[ListingConfig, ...]
+
+    @property
+    def quote_token(self) -> TokenConfig:
+        """返回配置显式声明的计价稳定币。"""
+        return self.token0 if self.quote_leg == "token0" else self.token1
+
+    @property
+    def base_token(self) -> TokenConfig:
+        """返回计价腿之外的标的代币。"""
+        return self.token1 if self.quote_leg == "token0" else self.token0
 
 
 @dataclass(frozen=True)
@@ -132,11 +143,17 @@ def _pool(data: Any, index: int) -> PoolConfig:
     if type(enabled) is not bool:
         raise ConfigError(f"{path}.enabled 类型不符：应为布尔值")
     factory = item.get("factory")
+    quote_leg = _required(item, "quote_leg", path)
+    if type(quote_leg) is not str or quote_leg not in ("token0", "token1"):
+        raise ConfigError(
+            f'{path}.quote_leg 必须精确等于 "token0" 或 "token1"'
+        )
     return PoolConfig(
         _string(_required(item, "id", path), f"{path}.id"), enabled,
         _string(_required(item, "uniswap_version", path), f"{path}.uniswap_version"),
         _address(_required(item, "address", path), f"{path}.address"),
         None if factory is None else _address(factory, f"{path}.factory"),
+        quote_leg,
         _token(_required(item, "token0", path), f"{path}.token0"),
         _token(_required(item, "token1", path), f"{path}.token1"),
         _decimal(_required(item, "fee_bps", path), f"{path}.fee_bps"),

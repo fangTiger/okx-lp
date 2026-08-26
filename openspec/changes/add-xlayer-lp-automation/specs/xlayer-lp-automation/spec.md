@@ -443,3 +443,42 @@
 #### Scenario: 人工清锁兼容模式
 - **WHEN** 操作者未向清锁工具传入 `--reset-state`
 - **THEN** 工具保持既有行为，只原子清空 failure 与 failed_at
+
+### Requirement: 池必须显式声明计价腿
+系统 SHALL 要求每个池以 `quote_leg` 精确声明 `token0` 或 `token1` 为计价稳定币，且不得根据代币符号推断。
+
+#### Scenario: 缺失或非法计价腿
+- **WHEN** `quote_leg` 缺失、为空、类型错误或不是 `token0`/`token1`
+- **THEN** 配置加载以中文 `ConfigError` 失败关闭
+
+### Requirement: 估值与 50/50 不受币序影响
+系统 SHALL 保持价格为每单位 token0 对应的 token1，并将任意币序的余额、兑换差额和拆单金额统一换算成计价腿单位。
+
+#### Scenario: 镜像经济状态
+- **WHEN** 同一标的与稳定币余额分别以稳定币在 token0 和 token1 的镜像池表达
+- **THEN** 两池总价值与 50/50 兑换美元金额相等，兑换方向表达同一经济动作
+
+#### Scenario: 拆单阈值
+- **WHEN** 镜像池的兑换计价价值分别为 600 或 400
+- **THEN** 两池的 600 美元兑换都拆单，400 美元兑换都不拆单
+
+### Requirement: 运维入口支持池选择
+系统 SHALL 为生产、动作预览、阶段清锁和账户读取入口提供可选 `--pool-id`，缺省选择首池。
+
+#### Scenario: 选择 USDG/wMRNAx
+- **WHEN** 操作者指定 `--pool-id wMRNAx_USDG`
+- **THEN** 全链路使用该池的地址、两腿、手续费、授权策略和池级状态
+
+### Requirement: 多池运行状态相互隔离
+系统 SHALL 按池 ID 隔离状态机文件、再平衡进度、每日再平衡计数和 NAV 文件。
+
+#### Scenario: 两池同时运行
+- **WHEN** 两个池分别记录再平衡和 NAV
+- **THEN** 任一池的恢复、次数闸门与 NAV 不读取或累计另一池记录
+
+### Requirement: USDG/wMRNAx 使用有限授权
+系统 SHALL 为 USDG 与 wMRNAx 仅开放 `approve`，且 spender 只能是 NPM 或 Router、额度不得超过各自配置上限、不得无限授权。
+
+#### Scenario: 非法授权
+- **WHEN** spender 是其他地址或授权值超过上限
+- **THEN** calldata 参数策略拒绝该交易

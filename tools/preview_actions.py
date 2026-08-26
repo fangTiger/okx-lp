@@ -91,6 +91,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--owner", required=True, help="需要对账的 EVM 地址")
     parser.add_argument(
+        "--pool-id", help="目标池配置 ID；缺省使用首个池"
+    )
+    parser.add_argument(
         "--action", required=True, choices=("enter", "exit"),
         help="需要预览的动作",
     )
@@ -207,7 +210,7 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("拒绝 --broadcast：生产入口在批次 8")
 
     config = load_config(POOLS_CONFIG_PATH)
-    pool = config.find_pool()
+    pool = config.find_pool(args.pool_id)
     npm_address, router_address, quoter_address = _execution_addresses(
         EXECUTION_CONFIG_PATH
     )
@@ -235,6 +238,7 @@ def main(argv: list[str] | None = None) -> None:
         POOLS_CONFIG_PATH,
         executor_address=args.owner,
         allowed_token_ids=result.token_ids,
+        pool_id=args.pool_id,
     )
     sample = _sample_at_block(rpc, pool, result.snapshot.block)
     action_reader: Any = reader

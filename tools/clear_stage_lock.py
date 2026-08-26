@@ -48,7 +48,9 @@ class ReadOnlyContext:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="链上对账后清除阶段锁停")
-    parser.add_argument("--pool-id", required=True, help="目标池配置 ID")
+    parser.add_argument(
+        "--pool-id", help="目标池配置 ID；缺省使用首个池"
+    )
     parser.add_argument("--owner", required=True, help="需要对账的 EVM 地址")
     parser.add_argument(
         "--reset-state", action="store_true",
@@ -76,7 +78,7 @@ def _execution_addresses(path: Path = EXECUTION_CONFIG_PATH) -> tuple[str, str]:
         raise ValueError(f"无法读取执行配置 {path}：{error}") from error
 
 
-def create_read_only_context(pool_id: str) -> ReadOnlyContext:
+def create_read_only_context(pool_id: str | None = None) -> ReadOnlyContext:
     """仅创建读 RPC、账户 reader 与对账 spender。"""
     config = load_config(POOLS_CONFIG_PATH)
     pool = config.find_pool(pool_id)
@@ -332,7 +334,8 @@ def main(
         target = state.state
         if args.reset_state and state.state is MachineState.REBALANCING:
             progress_path, progress = _select_rebalance_progress(
-                state_dir / "rebalances", args.rebalance_id,
+                state_dir / "rebalances" / context.pool.pool_id,
+                args.rebalance_id,
             )
             printer(_render_rebalance_progress(
                 progress_path, progress, result.active_position,

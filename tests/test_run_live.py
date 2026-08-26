@@ -17,7 +17,7 @@ from okxlp.uniswap.tickmath import tick_to_price
 from tools.run_live import (
     IGNORE_SESSIONS_WARNING, LiveRuntime, RiskSettings, _approval_requirements,
     _banner, _ensure_startup_write_allowed, _market_sessions,
-    _sync_machine_state, build_parser, main, parse_args,
+    _runtime_paths, _sync_machine_state, build_parser, main, parse_args,
 )
 
 
@@ -76,6 +76,27 @@ def settings():
 
 
 class RunLiveGateTest(unittest.TestCase):
+    def test_pool_id_is_optional_and_selectable(self):
+        base = ["--owner", OWNER, "--keystore", "temporary-keystore.json"]
+
+        self.assertIsNone(build_parser().parse_args(base).pool_id)
+        selected = build_parser().parse_args(
+            [*base, "--pool-id", "wMRNAx_USDG"]
+        )
+        self.assertEqual(selected.pool_id, "wMRNAx_USDG")
+
+    def test_runtime_paths_are_isolated_by_pool(self):
+        first = _runtime_paths("wASMLx_USDC")
+        second = _runtime_paths("wMRNAx_USDG")
+
+        for field in (
+            "machine_state", "transition_journal", "rebalance_journal",
+            "rebalance_counter", "nav_root",
+        ):
+            self.assertNotEqual(getattr(first, field), getattr(second, field))
+        self.assertIn("wMRNAx_USDG", str(second.rebalance_journal))
+        self.assertIn("wMRNAx_USDG", str(second.nav_root))
+
     def test_startup_approve_obeys_halt_but_preserves_exit_permission(self):
         class Gate:
             def __init__(self, decision):
@@ -98,9 +119,13 @@ class RunLiveGateTest(unittest.TestCase):
             router_address="router",
             max_approval_raw={"asset": 100, "usdc": 200},
         )
+        base = SimpleNamespace(address="asset", symbol="wASMLx")
+        quote = SimpleNamespace(address="usdc", symbol="USDC")
         pool = SimpleNamespace(
-            token0=SimpleNamespace(symbol="wASMLx"),
-            token1=SimpleNamespace(symbol="USDC"),
+            token0=base,
+            token1=quote,
+            base_token=base,
+            quote_token=quote,
         )
         active = SimpleNamespace(active_position=object())
         empty = SimpleNamespace(active_position=None)

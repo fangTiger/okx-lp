@@ -16,6 +16,7 @@ pools:
     uniswap_version: v3
     address: "0xc3d659028117f1ae5db9b9c68239b4a71f03ef37"
     factory: "0x4b2ab38dbf28d31d467aa8993f6c2585981d6804"
+    quote_leg: token1
     token0:
       symbol: wASMLx
       name: Wrapped ASML xStock
@@ -43,6 +44,28 @@ pools:
       price_usdc: 1770.77
       pool_notional_usdc: 244600
       active_liquidity_equiv_usdc_at_0p5pct: 2886
+
+  - id: wMRNAx_USDG
+    enabled: true
+    uniswap_version: v3
+    address: "0x3a6a9eb4db50edfbc776a11b551eae015a3d7e90"
+    factory: "0x4b2ab38dbf28d31d467aa8993f6c2585981d6804"
+    quote_leg: token0
+    token0:
+      symbol: USDG
+      address: "0x4ae46a509f6b1d9056937ba4500cb143933d2dc8"
+      decimals: 6
+    token1:
+      symbol: wMRNAx
+      address: "0xce0fbc16e820ab7fd6d2936f1533c2654ad49ae9"
+      decimals: 18
+    fee_bps: 5
+    tick_spacing: 10
+    underlying: MRNA
+    listings:
+      - venue: NASDAQ
+        timezone: America/New_York
+        hours_local: "09:30-16:00"
 
 session:
   fx_sunday_open:

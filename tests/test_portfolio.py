@@ -204,6 +204,17 @@ def load_portfolio_tool():
 
 
 class PortfolioToolTest(unittest.TestCase):
+    def test_pool_id_is_optional_and_selectable(self):
+        tool = load_portfolio_tool()
+
+        self.assertIsNone(
+            tool.build_parser().parse_args(["--owner", OWNER]).pool_id
+        )
+        selected = tool.build_parser().parse_args([
+            "--owner", OWNER, "--pool-id", "wMRNAx_USDG",
+        ])
+        self.assertEqual(selected.pool_id, "wMRNAx_USDG")
+
     def test_owner_argument_is_required(self):
         tool = load_portfolio_tool()
 
