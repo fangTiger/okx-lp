@@ -18,6 +18,7 @@ class MarketSample:
 
     price: Decimal
     tick: int
+    sqrt_price_x96: int | None = None
 
 
 @dataclass(frozen=True)

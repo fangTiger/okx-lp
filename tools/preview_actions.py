@@ -122,7 +122,7 @@ def _sample_at_block(rpc, pool, block: int) -> MarketSample:
     price = sqrt_price_x96_to_price(
         sqrt_price_x96, pool.token0.decimals, pool.token1.decimals
     )
-    return MarketSample(price, tick)
+    return MarketSample(price, tick, sqrt_price_x96)
 
 
 def _position_amounts(position, current_tick: int) -> tuple[int, int]:

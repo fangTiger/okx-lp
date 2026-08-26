@@ -12,6 +12,7 @@ from okxlp.uniswap.tickmath import (
     capital_to_liquidity,
     liquidity_share,
     liquidity_to_capital,
+    position_amounts,
     price_to_sqrt_price_x96,
     price_to_tick,
     sqrt_price_x96_to_price,
@@ -108,6 +109,66 @@ class TickMathTest(unittest.TestCase):
         active = Decimal("14942241291635132")
         mine = Decimal("1000000000000000")
         self.assertEqual(liquidity_share(active, mine), mine / (active + mine))
+
+    def test_position_amounts_below_range_is_all_token0(self):
+        sqrt_price = price_to_sqrt_price_x96(Decimal("0.99"), 0, 0)
+
+        amount0, amount1 = position_amounts(10**18, 0, 100, sqrt_price)
+
+        self.assertGreater(amount0, 0)
+        self.assertEqual(amount1, 0)
+
+    def test_position_amounts_above_range_is_all_token1(self):
+        sqrt_price = price_to_sqrt_price_x96(Decimal("1.02"), 0, 0)
+
+        amount0, amount1 = position_amounts(10**18, 0, 100, sqrt_price)
+
+        self.assertEqual(amount0, 0)
+        self.assertGreater(amount1, 0)
+
+    def test_position_amounts_in_range_has_both_tokens(self):
+        sqrt_price = price_to_sqrt_price_x96(Decimal("1.005"), 0, 0)
+
+        amount0, amount1 = position_amounts(10**18, 0, 100, sqrt_price)
+
+        self.assertGreater(amount0, 0)
+        self.assertGreater(amount1, 0)
+
+    def test_position_15857_counterexample_matches_independent_formula(self):
+        liquidity = 21126254269852
+        price = Decimal("1771.4431701141646")
+        sqrt_price = price_to_sqrt_price_x96(price, 18, 6)
+
+        amount0, amount1 = position_amounts(
+            liquidity, -201970, -201070, sqrt_price,
+        )
+
+        expected0_raw = Decimal("0.011284654228689677") * Decimal(10**18)
+        expected1_raw = Decimal("19.573854999999594") * Decimal(10**6)
+        self.assertLess(
+            abs(Decimal(amount0) - expected0_raw) / expected0_raw,
+            Decimal("1e-9"),
+        )
+        self.assertLess(expected0_raw - Decimal(amount0), Decimal(1))
+        # API 按 raw 单位向下取整，USDC 的 6 位精度会截去报告中的小数 raw。
+        self.assertEqual(amount1, int(expected1_raw))
+        self.assertLess(expected1_raw - Decimal(amount1), Decimal(1))
+        actual_value = (
+            Decimal(amount0) / Decimal(10**18) * price
+            + Decimal(amount1) / Decimal(10**6)
+        )
+        floor_adjusted_value = (
+            expected0_raw / Decimal(10**18) * price
+            + Decimal(int(expected1_raw)) / Decimal(10**6)
+        )
+        self.assertLess(
+            abs(actual_value - floor_adjusted_value) / floor_adjusted_value,
+            Decimal("1e-9"),
+        )
+        self.assertLess(
+            Decimal("39.5639786605") - actual_value,
+            Decimal("0.0000011"),
+        )
 
 
 if __name__ == "__main__":

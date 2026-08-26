@@ -54,6 +54,41 @@ def price_to_sqrt_price_x96(
         return int(encoded.to_integral_value(rounding=ROUND_FLOOR))
 
 
+def position_amounts(
+    liquidity: int, tick_lower: int, tick_upper: int, sqrt_price_x96: int,
+) -> tuple[int, int]:
+    """按当前价格与区间返回头寸的 (amount0_raw, amount1_raw)。"""
+    if type(liquidity) is not int or liquidity < 0:
+        raise ValueError("liquidity 必须是非负整数")
+    if (
+        type(tick_lower) is not int
+        or type(tick_upper) is not int
+        or tick_lower >= tick_upper
+    ):
+        raise ValueError("tick_lower 必须小于 tick_upper")
+    if type(sqrt_price_x96) is not int or sqrt_price_x96 <= 0:
+        raise ValueError("sqrt_price_x96 必须是正整数")
+    with localcontext() as context:
+        context.prec = 80
+        sa = (TICK_BASE**tick_lower).sqrt() * Q96
+        sb = (TICK_BASE**tick_upper).sqrt() * Q96
+        sp = Decimal(sqrt_price_x96)
+        value = Decimal(liquidity)
+        if sp <= sa:
+            amount0 = value * (sb - sa) * Q96 / (sa * sb)
+            amount1 = Decimal(0)
+        elif sp >= sb:
+            amount0 = Decimal(0)
+            amount1 = value * (sb - sa) / Q96
+        else:
+            amount0 = value * (sb - sp) * Q96 / (sp * sb)
+            amount1 = value * (sp - sa) / Q96
+        return (
+            int(amount0.to_integral_value(rounding=ROUND_FLOOR)),
+            int(amount1.to_integral_value(rounding=ROUND_FLOOR)),
+        )
+
+
 def aligned_tick_range(current_tick: int, width: Decimal, tick_spacing: int) -> tuple[int, int]:
     """按相对价格宽度计算区间，并把两端向外对齐。"""
     if not Decimal(0) < width < Decimal(1):

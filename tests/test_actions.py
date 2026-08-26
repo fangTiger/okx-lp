@@ -1,6 +1,6 @@
 import unittest
 from dataclasses import replace
-from decimal import Decimal
+from decimal import Decimal, ROUND_FLOOR
 from types import SimpleNamespace
 
 from eth_abi import decode, encode
@@ -14,6 +14,9 @@ from okxlp.strategy.machine_types import MarketSample
 from okxlp.uniswap.portfolio import OwnedPosition, PortfolioSnapshot
 from okxlp.uniswap.position import PositionManager
 from okxlp.uniswap.swap import ScheduledSwap, SwapPolicy, SwapQuote
+from okxlp.uniswap.tickmath import (
+    position_amounts, price_to_sqrt_price_x96, tick_to_price,
+)
 
 
 OWNER = "0xb7394e865eb6f22df7aa199e59887e8aac0947a2"
@@ -21,7 +24,10 @@ NPM = "0x315e413a11ab0df498ef83873012430ca36638ae"
 ROUTER = "0x4f0c28f5926afda16bf2506d5d9e57ea190f9bca"
 TOKEN0 = "0x9147b03c16b18fc4f686f610f189f91ddf4347b4"
 TOKEN1 = "0xb6ceceab302e2e4948951ee7843fc24e92933061"
-SAMPLE = MarketSample(Decimal("2000"), -201_526)
+SAMPLE = MarketSample(
+    Decimal("2000"), -201_526,
+    price_to_sqrt_price_x96(Decimal("2000"), 18, 6),
+)
 BAND = PriceBand(-201_591, -201_463, Decimal("1990"), Decimal("2010"))
 POOL = SimpleNamespace(
     token0=SimpleNamespace(address=TOKEN0, symbol="wASMLx", decimals=18),
@@ -31,7 +37,7 @@ POOL = SimpleNamespace(
 )
 
 
-def owned_position(liquidity=1_000) -> OwnedPosition:
+def owned_position(liquidity=21_126_254_269_852) -> OwnedPosition:
     return OwnedPosition(
         token_id=15_857,
         token0=TOKEN0,
@@ -194,6 +200,29 @@ def decode_mint(intent):
     )[0]
 
 
+def decode_decrease(intent):
+    return decode(
+        ["(uint256,uint128,uint256,uint256,uint256)"],
+        bytes.fromhex(intent.calldata[10:]),
+    )[0]
+
+
+def sample_at_tick(tick):
+    price = tick_to_price(tick, 18, 6)
+    return MarketSample(
+        price, tick, price_to_sqrt_price_x96(price, 18, 6)
+    )
+
+
+def expected_minimum(value):
+    return int(
+        (
+            Decimal(value) * (Decimal(10_000) - Decimal(30))
+            / Decimal(10_000)
+        ).to_integral_value(rounding=ROUND_FLOOR)
+    )
+
+
 class ProductionEnterTest(unittest.TestCase):
     def test_zero_available_capital_fails_before_constructing_any_intent(self):
         approval = FakeApprovalManager()
@@ -275,6 +304,27 @@ class ProductionEnterTest(unittest.TestCase):
 
 
 class ProductionExitTest(unittest.TestCase):
+    def test_in_range_decrease_uses_exact_slippage_minimums(self):
+        position = owned_position(liquidity=21_126_254_269_852)
+        sample = sample_at_tick(-201_525)
+        reader = SequenceReader(
+            snapshot(positions=(position,)),
+            snapshot(positions=(owned_position(0),)),
+        )
+        actions, dependencies = make_actions(reader=reader)
+
+        actions.exit(sample)
+
+        values = decode_decrease(dependencies.executor.intents[0])
+        expected0, expected1 = position_amounts(
+            position.liquidity, position.tick_lower,
+            position.tick_upper, sample.sqrt_price_x96,
+        )
+        self.assertGreater(values[2], 0)
+        self.assertGreater(values[3], 0)
+        self.assertEqual(values[2], expected_minimum(expected0))
+        self.assertEqual(values[3], expected_minimum(expected1))
+
     def test_exit_orders_decrease_collect_swap_and_burn(self):
         reader = SequenceReader(
             snapshot(positions=(owned_position(),)),
@@ -354,6 +404,51 @@ class ProductionExitTest(unittest.TestCase):
 
 
 class ProductionRebalanceActionsTest(unittest.TestCase):
+    def test_below_range_decrease_allows_zero_token1_minimum(self):
+        position = owned_position(liquidity=21_126_254_269_852)
+        sample = sample_at_tick(position.tick_lower - 10)
+        actions, _dependencies = make_actions(
+            reader=SequenceReader(snapshot(positions=(position,)))
+        )
+
+        values = decode_decrease(
+            actions.rebalance_actions(sample, BAND).burn("1" * 32)
+        )
+
+        self.assertGreater(values[2], 0)
+        self.assertEqual(values[3], 0)
+
+    def test_above_range_decrease_allows_zero_token0_minimum(self):
+        position = owned_position(liquidity=21_126_254_269_852)
+        sample = sample_at_tick(position.tick_upper + 10)
+        actions, _dependencies = make_actions(
+            reader=SequenceReader(snapshot(positions=(position,)))
+        )
+
+        values = decode_decrease(
+            actions.rebalance_actions(sample, BAND).burn("2" * 32)
+        )
+
+        self.assertEqual(values[2], 0)
+        self.assertGreater(values[3], 0)
+
+    def test_nonzero_liquidity_never_encodes_two_zero_minimums(self):
+        position = owned_position(liquidity=21_126_254_269_852)
+        for tick in (
+            position.tick_lower - 10,
+            (position.tick_lower + position.tick_upper) // 2,
+            position.tick_upper + 10,
+        ):
+            with self.subTest(tick=tick):
+                sample = sample_at_tick(tick)
+                actions, _dependencies = make_actions(
+                    reader=SequenceReader(snapshot(positions=(position,)))
+                )
+                values = decode_decrease(
+                    actions.rebalance_actions(sample, BAND).burn("3" * 32)
+                )
+                self.assertNotEqual(values[2:4], (0, 0))
+
     def test_callbacks_use_current_position_ids_balances_and_preallocated_ids(self):
         reader = SequenceReader(
             snapshot(
@@ -386,7 +481,9 @@ class ProductionRebalanceActionsTest(unittest.TestCase):
             ["(uint256,address,uint128,uint128)"],
             bytes.fromhex(collect.calldata[10:]),
         )[0]
-        self.assertEqual(decrease_values[:2], (15_857, 1_000))
+        self.assertEqual(
+            decrease_values[:2], (15_857, owned_position().liquidity)
+        )
         self.assertEqual(decrease.intent_id, ids[0])
         self.assertEqual(collect_values[:2], (15_857, OWNER))
         self.assertEqual(collect.intent_id, ids[1])

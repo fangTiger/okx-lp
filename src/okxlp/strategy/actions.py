@@ -16,6 +16,7 @@ from okxlp.exec.authorization import require_broadcast_flag
 from okxlp.exec.intent import Intent, IntentStatus
 from okxlp.strategy.allocation import BalanceSnapshot
 from okxlp.strategy.rebalance import RebalanceActions
+from okxlp.uniswap.tickmath import position_amounts
 
 
 LOGGER = logging.getLogger(__name__)
@@ -102,6 +103,34 @@ class ProductionActions:
         if minimum <= 0:
             raise ActionError("mint 最低数量为 0，拒绝无保护建仓")
         return minimum
+
+    def _decrease_minimums(self, position, sample) -> tuple[int, int]:
+        """按决策轮同区块池价计算 decreaseLiquidity 两腿下限。"""
+        sqrt_price_x96 = getattr(sample, "sqrt_price_x96", None)
+        if type(sqrt_price_x96) is not int or sqrt_price_x96 <= 0:
+            raise ActionError("决策池快照缺少有效 sqrt_price_x96，拒绝撤流动性")
+        expected0, expected1 = position_amounts(
+            position.liquidity,
+            position.tick_lower,
+            position.tick_upper,
+            sqrt_price_x96,
+        )
+
+        def protected(expected: int) -> int:
+            return int(
+                (
+                    Decimal(expected)
+                    * (BPS - self.swap_policy.max_slippage_bps)
+                    / BPS
+                ).to_integral_value(rounding=ROUND_FLOOR)
+            )
+
+        minimums = protected(expected0), protected(expected1)
+        if position.liquidity > 0 and minimums == (0, 0):
+            raise ActionError(
+                "非零流动性头寸的两腿滑点下限均为 0，拒绝无保护撤出"
+            )
+        return minimums
 
     def _execute(self, intent: Intent, stage: str, broadcast: bool) -> None:
         try:
@@ -212,13 +241,14 @@ class ProductionActions:
         """返回沿用 burn 阶段名的 decrease、collect、swap、mint 回调。"""
         initial = self.reader.read(self.owner, spenders=self._spenders)
         position = self._active_position(initial)
+        amount0_min, amount1_min = self._decrease_minimums(position, sample)
 
         def burn(intent_id: str) -> Intent:
             return self.position_manager.decrease_liquidity(
                 token_id=position.token_id,
                 liquidity=position.liquidity,
-                amount0_min=0,
-                amount1_min=0,
+                amount0_min=amount0_min,
+                amount1_min=amount1_min,
                 deadline=self._deadline(),
                 intent_id=intent_id,
             )
@@ -284,12 +314,13 @@ class ProductionActions:
         broadcast = require_broadcast_flag(allow_broadcast)
         initial = self.reader.read(self.owner, spenders=self._spenders)
         position = self._active_position(initial)
+        amount0_min, amount1_min = self._decrease_minimums(position, sample)
         try:
             decrease = self.position_manager.decrease_liquidity(
                 token_id=position.token_id,
                 liquidity=position.liquidity,
-                amount0_min=0,
-                amount1_min=0,
+                amount0_min=amount0_min,
+                amount1_min=amount1_min,
                 deadline=self._deadline(),
             )
         except Exception as error:

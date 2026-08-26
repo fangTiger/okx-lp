@@ -257,3 +257,63 @@
 #### Scenario: 请求预览工具广播
 - **WHEN** 操作者传入 `--broadcast`
 - **THEN** 工具以非零状态退出并说明生产入口在批次 8
+
+### Requirement: 简版生产风控闸门
+系统 MUST 按 HALT、live 事实、UTC 当日再平衡次数的顺序检查写链权限，并为撤出单独返回布尔权限。
+
+#### Scenario: 人工急停完全冻结
+- **WHEN** HALT 文件存在
+- **THEN** 闸门返回 `allowed=false` 且 `allow_exit=false`，每轮重新读取文件
+
+#### Scenario: 事实或次数只阻止新仓
+- **WHEN** live 事实未核实或 UTC 当日再平衡次数达到配置上限
+- **THEN** 闸门返回 `allowed=false` 且 `allow_exit=true`
+
+#### Scenario: 完成一次再平衡
+- **WHEN** 生产循环观察到 `REBALANCING` 转移至 `IN_RANGE`
+- **THEN** 系统以原子 JSON 文件把当前 UTC 日期计数加一
+
+### Requirement: NAV 基础快照
+系统 MUST 使用字符串 Decimal 与整数 raw 数量记录基础 NAV，不得让 float 进入快照。
+
+#### Scenario: 记录同区块头寸估值
+- **WHEN** 生产循环完成一轮
+- **THEN** 系统按标准 V3 三段式公式计算 LP 两腿数量，并把时间、区块、价格、LP 估值、闲置两腿与总值追加到 UTC 日期 JSONL
+
+#### Scenario: NAV 写入节流
+- **WHEN** 同一 UTC 日期距上次成功记录不足 300 秒
+- **THEN** 记录器返回 false 且不追加新行；跨日时写入新的日期文件
+
+### Requirement: decreaseLiquidity 滑点保护
+系统 MUST 使用状态机决策轮同一区块的 `sqrtPriceX96` 计算撤流动性的预期两腿数量，并按配置滑点向下计算最小数量。
+
+#### Scenario: 价格在区间内
+- **WHEN** 头寸当前价格位于 tickLower 与 tickUpper 之间
+- **THEN** exit 与 rebalance 的 decreaseLiquidity 两个最小数量均等于预期数量扣除最大滑点后的向下取整值，且均大于零
+
+#### Scenario: 价格在区间外
+- **WHEN** 当前价格位于区间下方或上方
+- **THEN** 数学上无法取出的那一腿最小数量允许为零，另一腿必须具有滑点下限
+
+#### Scenario: 签名边界拒绝双零下限
+- **WHEN** 非零流动性的 decreaseLiquidity calldata 中两个最小数量同时为零
+- **THEN** calldata 参数策略拒绝签名
+
+### Requirement: 生产入口三重广播门
+系统 MUST 只在配置 `mode=live`、显式 `--broadcast` 与精确交互确认同时成立时允许广播；用户显式传入 `--yes` 时可以代替第三重交互确认，但它不得代替前两重门。系统并 MUST 在所有退出路径关闭签名子进程。
+
+#### Scenario: dry_run 请求广播
+- **WHEN** 配置为 `mode=dry_run` 且传入 `--broadcast`
+- **THEN** 入口在创建 RPC 客户端前非零退出
+
+#### Scenario: 实盘确认错误
+- **WHEN** 已请求广播但输入不等于 `我确认实盘`
+- **THEN** 入口非零退出，不执行 approve 或状态机循环，并关闭签名子进程
+
+#### Scenario: 显式非交互确认
+- **WHEN** 同时传入 `--broadcast --yes`
+- **THEN** `--yes` 代替精确交互输入；若未传 `--broadcast`，`--yes` 不得使广播权限变为 true
+
+#### Scenario: 签名地址不一致
+- **WHEN** keystore 推导的 signer.address 与 owner 不一致
+- **THEN** 入口立即退出且不进入循环

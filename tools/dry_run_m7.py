@@ -120,7 +120,9 @@ def main() -> None:
     pool_config = config.find_pool()
     rpc = JsonRpcClient(config.chain.rpc_urls, chain_id=config.chain.chain_id)
     snapshot = UniswapV3Pool(rpc, pool_config.address).snapshot()
-    sample = MarketSample(snapshot.price, snapshot.tick)
+    sample = MarketSample(
+        snapshot.price, snapshot.tick, snapshot.sqrt_price_x96
+    )
     risk_config = _risk_config()
     outrange = risk_config["outrange"]
     halt_file = Path(risk_config["circuit_breakers"]["halt_file"])

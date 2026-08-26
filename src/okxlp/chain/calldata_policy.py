@@ -337,11 +337,22 @@ class CalldataPolicy:
                 )
 
     def _validate_decrease(self, values: tuple[Any, ...], now_ts: int) -> None:
-        token_id, liquidity, _amount0_min, _amount1_min, deadline = values
+        token_id, liquidity, amount0_min, amount1_min, deadline = values
         self._token_id(token_id)
         if type(liquidity) is not int or liquidity <= 0:
             raise CalldataPolicyError(
                 f"liquidity 不合规：期望正整数，实际值={liquidity}"
+            )
+        if any(
+            type(amount) is not int or amount < 0
+            for amount in (amount0_min, amount1_min)
+        ):
+            raise CalldataPolicyError(
+                "amount0Min 与 amount1Min 必须是非负整数"
+            )
+        if amount0_min == 0 and amount1_min == 0:
+            raise CalldataPolicyError(
+                "amount0Min 与 amount1Min 不得同时为 0"
             )
         self._deadline(deadline, now_ts)
 

@@ -50,10 +50,13 @@ class CalldataPolicyTest(unittest.TestCase):
                   recipient, deadline)
         return calldata("0x88316456", MINT_TYPE, values)
 
-    def decrease(self, *, token_id=TOKEN_ID, liquidity=123, deadline=NOW + 600):
+    def decrease(
+        self, *, token_id=TOKEN_ID, liquidity=123,
+        amount0_min=1, amount1_min=1, deadline=NOW + 600,
+    ):
         return calldata(
             "0x0c49ccbe", DECREASE_TYPE,
-            (token_id, liquidity, 0, 0, deadline),
+            (token_id, liquidity, amount0_min, amount1_min, deadline),
         )
 
     def collect(self, *, token_id=TOKEN_ID, recipient=EXECUTOR):
@@ -178,6 +181,19 @@ class CalldataPolicyTest(unittest.TestCase):
     def test_a3_collect_rejects_attacker_recipient(self):
         self.assert_rejected(
             NPM, self.collect(recipient=ATTACKER), message="recipient"
+        )
+
+    def test_decrease_rejects_two_zero_minimums_but_allows_one_zero_leg(self):
+        self.assert_rejected(
+            NPM,
+            self.decrease(amount0_min=0, amount1_min=0),
+            message="amount0Min.*amount1Min",
+        )
+        self.policy.validate(
+            target=NPM,
+            calldata=self.decrease(amount0_min=0, amount1_min=1),
+            value=0,
+            now_ts=NOW,
         )
 
     def test_swap_parameter_attacks_are_rejected_individually(self):

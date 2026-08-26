@@ -11,6 +11,7 @@ log/
 !data/snapshots/*.jsonl
 
 # 密钥与私密配置（绝不入库）
+secrets/
 config/secrets.env
 *keystore*.json
 UTC--*
