@@ -9,6 +9,7 @@ from okxlp.exec.approval import ApprovalPlan
 from okxlp.exec.executor import ExecutionResult
 from okxlp.exec.intent import Intent, IntentStatus
 from okxlp.strategy.actions import ActionError, ProductionActions
+from okxlp.strategy.allocation import calculate_50_50_swap
 from okxlp.strategy.machine_state import PriceBand
 from okxlp.strategy.machine_types import MarketSample
 from okxlp.uniswap.portfolio import OwnedPosition, PortfolioSnapshot
@@ -44,6 +45,19 @@ MINT_REGRESSION_SAMPLE = MarketSample(
 BAND = PriceBand(-201_591, -201_463, Decimal("1990"), Decimal("2010"))
 MINT_REGRESSION_BAND = PriceBand(
     -201_730, -201_620, Decimal("1735"), Decimal("1755"),
+)
+INCIDENT_PRICE = Decimal("1756")
+INCIDENT_TICK = price_to_tick(INCIDENT_PRICE, 18, 6)
+INCIDENT_SAMPLE = MarketSample(
+    INCIDENT_PRICE,
+    INCIDENT_TICK,
+    price_to_sqrt_price_x96(INCIDENT_PRICE, 18, 6),
+)
+INCIDENT_BAND = PriceBand(
+    (INCIDENT_TICK // 10 - 5) * 10,
+    (INCIDENT_TICK // 10 + 6) * 10,
+    Decimal("1746"),
+    Decimal("1766"),
 )
 POOL = SimpleNamespace(
     token0=SimpleNamespace(address=TOKEN0, symbol="wASMLx", decimals=18),
@@ -355,6 +369,7 @@ class ProductionEnterTest(unittest.TestCase):
             ),
         )
         self.assertEqual(len(reader.calls), 2)
+        self.assertEqual(len(dependencies.fact_gate.calls), 1)
         self.assertGreater(mint[7], 0)
         self.assertEqual(mint[8], 0)
 
@@ -534,6 +549,28 @@ class ProductionExitTest(unittest.TestCase):
             dependencies.swap_router.calls[0]["amount_usd"], Decimal("4000")
         )
 
+    def test_exit_swaps_all_asset_even_when_value_exceeds_capital_limit(self):
+        asset_raw = int(
+            (
+                Decimal("99.8") / INCIDENT_PRICE * Decimal(10**18)
+            ).to_integral_value(rounding=ROUND_FLOOR)
+        )
+        reader = SequenceReader(
+            snapshot(positions=(owned_position(),)),
+            snapshot(
+                balance0=asset_raw,
+                balance1=99_960_000,
+                positions=(owned_position(0),),
+            ),
+        )
+        actions, dependencies = make_actions(reader=reader, fact_limit=50)
+
+        actions.exit(INCIDENT_SAMPLE)
+
+        self.assertEqual(
+            dependencies.swap_router.calls[0]["amount_in"], asset_raw
+        )
+
     def test_exit_skips_swap_when_actual_wasmlx_balance_is_zero(self):
         reader = SequenceReader(
             snapshot(positions=(owned_position(),)),
@@ -593,6 +630,177 @@ class ProductionExitTest(unittest.TestCase):
 
 
 class ProductionRebalanceActionsTest(unittest.TestCase):
+    @staticmethod
+    def _incident_portfolio(*, with_position=True):
+        positions = (owned_position(),) if with_position else ()
+        return snapshot(
+            balance0=14_364_270_543_869_171,
+            balance1=174_693_571,
+            positions=positions,
+        )
+
+    def test_read_balances_caps_incident_wallet_to_fifty_dollars(self):
+        portfolio = self._incident_portfolio()
+        actions, _dependencies = make_actions(
+            reader=SequenceReader(portfolio), fact_limit=50
+        )
+
+        balances = actions.rebalance_actions(
+            INCIDENT_SAMPLE, INCIDENT_BAND
+        ).read_balances()
+
+        value = (
+            Decimal(balances.amount0_raw) / Decimal(10**18) * INCIDENT_PRICE
+            + Decimal(balances.amount1_raw) / Decimal(10**6)
+        )
+        self.assertLessEqual(value, Decimal("50"))
+        self.assertNotEqual(
+            (balances.amount0_raw, balances.amount1_raw),
+            (portfolio.balance0_raw, portfolio.balance1_raw),
+        )
+
+    def test_incident_rebalance_swap_is_dust_after_capital_limit(self):
+        actions, _dependencies = make_actions(
+            reader=SequenceReader(self._incident_portfolio()), fact_limit=50
+        )
+        balances = actions.rebalance_actions(
+            INCIDENT_SAMPLE, INCIDENT_BAND
+        ).read_balances()
+
+        requirement = calculate_50_50_swap(balances, Decimal("1"))
+        precise = calculate_50_50_swap(balances, Decimal("0.01"))
+
+        self.assertIsNone(requirement)
+        self.assertIsNotNone(precise)
+        self.assertLess(precise.amount_usd, Decimal("1"))
+
+    def test_rebalance_mint_uses_band_ratio_and_desired_minimums(self):
+        portfolio = self._incident_portfolio()
+        actions, _dependencies = make_actions(
+            reader=SequenceReader(portfolio), fact_limit=50
+        )
+
+        mint = decode_mint(
+            actions.rebalance_actions(
+                INCIDENT_SAMPLE, INCIDENT_BAND
+            ).mint("4" * 32)
+        )
+
+        asset_value = (
+            Decimal(portfolio.balance0_raw) / Decimal(10**18) * INCIDENT_PRICE
+        )
+        budget1 = int(
+            ((Decimal("50") - asset_value) * Decimal(10**6))
+            .to_integral_value(rounding=ROUND_FLOOR)
+        )
+        expected = mint_amounts_for_budget(
+            portfolio.balance0_raw,
+            budget1,
+            INCIDENT_BAND.tick_lower,
+            INCIDENT_BAND.tick_upper,
+            INCIDENT_SAMPLE.sqrt_price_x96,
+        )
+        self.assertEqual(mint[5:7], expected)
+        self.assertEqual(
+            mint[7:9], tuple(expected_minimum(value) for value in expected)
+        )
+
+    def test_enter_and_rebalance_build_identical_mint_params(self):
+        portfolio = self._incident_portfolio(with_position=False)
+        enter_actions, enter_dependencies = make_actions(
+            reader=SequenceReader(portfolio), fact_limit=50
+        )
+        rebalance_actions, _dependencies = make_actions(
+            reader=SequenceReader(
+                replace(portfolio, positions=(owned_position(),))
+            ),
+            fact_limit=50,
+        )
+
+        enter_actions.enter(INCIDENT_SAMPLE, INCIDENT_BAND)
+        enter_mint = decode_mint(enter_dependencies.executor.intents[-1])
+        rebalance_mint = decode_mint(
+            rebalance_actions.rebalance_actions(
+                INCIDENT_SAMPLE, INCIDENT_BAND
+            ).mint("5" * 32)
+        )
+
+        self.assertEqual(enter_mint[5:9], rebalance_mint[5:9])
+
+    def test_capital_budget_caps_asset_heavy_wallet(self):
+        asset_raw = int(
+            (
+                Decimal("99.8") / INCIDENT_PRICE * Decimal(10**18)
+            ).to_integral_value(rounding=ROUND_FLOOR)
+        )
+        portfolio = snapshot(balance0=asset_raw, balance1=99_960_000)
+        actions, _dependencies = make_actions(fact_limit=50)
+
+        budget0, budget1 = actions._capital_budget(
+            portfolio, INCIDENT_PRICE
+        )
+
+        value = (
+            Decimal(budget0) / Decimal(10**18) * INCIDENT_PRICE
+            + Decimal(budget1) / Decimal(10**6)
+        )
+        self.assertLessEqual(budget0, portfolio.balance0_raw)
+        self.assertLessEqual(value, Decimal("50"))
+        self.assertLessEqual(Decimal("50") - value, Decimal("0.000001"))
+
+    def test_asset_heavy_rebalance_mint_keeps_pre_swap_capital_slice(self):
+        asset_raw = int(
+            (
+                Decimal("99.8") / INCIDENT_PRICE * Decimal(10**18)
+            ).to_integral_value(rounding=ROUND_FLOOR)
+        )
+        before_swap = snapshot(
+            balance0=asset_raw,
+            balance1=99_960_000,
+            positions=(owned_position(),),
+        )
+        reader = SequenceReader(before_swap, before_swap)
+        actions, _dependencies = make_actions(
+            reader=reader, fact_limit=50
+        )
+        callbacks = actions.rebalance_actions(
+            INCIDENT_SAMPLE, INCIDENT_BAND
+        )
+
+        balances = callbacks.read_balances()
+        requirement = calculate_50_50_swap(balances, Decimal("0.01"))
+        self.assertIsNotNone(requirement)
+        swaps = callbacks.build_swap(
+            requirement,
+            tuple(f"{index:032x}" for index in range(1, 6)),
+        )
+        quoted_received = sum(item.quote.amount_out for item in swaps)
+        actual_received = quoted_received - 123
+        reader.snapshots.append(
+            snapshot(
+                balance0=asset_raw - requirement.amount_in,
+                balance1=99_960_000 + actual_received,
+                positions=(owned_position(0),),
+            )
+        )
+
+        mint = decode_mint(callbacks.mint("6" * 32))
+
+        expected_budget0 = balances.amount0_raw - requirement.amount_in
+        expected_budget1 = balances.amount1_raw + actual_received
+        expected = mint_amounts_for_budget(
+            expected_budget0,
+            expected_budget1,
+            INCIDENT_BAND.tick_lower,
+            INCIDENT_BAND.tick_upper,
+            INCIDENT_SAMPLE.sqrt_price_x96,
+        )
+        self.assertNotEqual(expected, (0, 0))
+        self.assertEqual(mint[5:7], expected)
+        self.assertEqual(
+            mint[7:9], tuple(expected_minimum(value) for value in expected)
+        )
+
     def test_below_range_decrease_allows_zero_token1_minimum(self):
         position = owned_position(liquidity=21_126_254_269_852)
         sample = sample_at_tick(position.tick_lower - 10)
@@ -646,7 +854,7 @@ class ProductionRebalanceActionsTest(unittest.TestCase):
                 positions=(owned_position(),),
             )
         )
-        actions, dependencies = make_actions(reader=reader)
+        actions, dependencies = make_actions(reader=reader, fact_limit=5_000)
         callbacks = actions.rebalance_actions(SAMPLE, BAND)
         ids = tuple(f"{index:032x}" for index in range(1, 7))
 

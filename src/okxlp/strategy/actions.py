@@ -108,26 +108,34 @@ class ProductionActions:
             raise ActionError("mint 最低数量为 0，拒绝无保护建仓")
         return minimum
 
-    def _available_usd(self, portfolio, price: Decimal) -> Decimal:
+    def _capital_budget(
+        self, portfolio, price: Decimal, *,
+        capital_limit_usd: Decimal | None = None,
+    ) -> tuple[int, int]:
+        """按本金上限截断后返回本轮可投入的两腿 raw 预算。"""
         asset_raw = self._balance_raw(portfolio, self.asset)
         usdc_raw = self._balance_raw(portfolio, self.usdc)
         asset = Decimal(asset_raw) / (Decimal(10) ** self.asset.decimals)
         usdc = Decimal(usdc_raw) / (Decimal(10) ** self.usdc.decimals)
-        return asset * price + usdc
+        asset_usd = asset * price
+        available_usd = asset_usd + usdc
+        if capital_limit_usd is None:
+            total_capital_usd, probe_capital_usd = _capital_limits()
+            allowed_usd = self.fact_gate.max_position_usd(
+                total_capital_usd, probe_capital_usd
+            )
+        else:
+            allowed_usd = capital_limit_usd
+        capital_usd = min(available_usd, allowed_usd)
+        if capital_usd <= 0:
+            raise ActionError(
+                "可用本金为 0，请先在 config/risk.yaml 设置 "
+                "limits.total_capital_usd"
+            )
 
-    def _deployment_amounts(
-        self, portfolio, capital_usd: Decimal, price: Decimal,
-    ) -> tuple[int, int]:
-        """按标的优先规则从钱包余额截取本轮实际投入数量。"""
-        asset_balance = self._balance_raw(portfolio, self.asset)
-        asset_usd = (
-            Decimal(asset_balance)
-            / (Decimal(10) ** self.asset.decimals)
-            * price
-        )
         deploy_asset_usd = min(asset_usd, capital_usd)
         if deploy_asset_usd == asset_usd:
-            deploy_asset = asset_balance
+            deploy_asset = asset_raw
         else:
             deploy_asset = int(
                 (
@@ -141,7 +149,27 @@ class ProductionActions:
                 * (Decimal(10) ** self.usdc.decimals)
             ).to_integral_value(rounding=ROUND_FLOOR)
         )
-        return deploy_asset, deploy_usdc
+        deploy_asset = min(deploy_asset, asset_raw)
+        deploy_usdc = min(deploy_usdc, usdc_raw)
+        return self._ordered_amounts(deploy_asset, deploy_usdc)
+
+    def _mint_params(
+        self, budget0: int, budget1: int, band, sqrt_price_x96: int,
+    ) -> tuple[int, int, int, int]:
+        """返回按区间配比后的 desired 与基于 desired 的滑点下限。"""
+        amount0_desired, amount1_desired = mint_amounts_for_budget(
+            budget0,
+            budget1,
+            band.tick_lower,
+            band.tick_upper,
+            sqrt_price_x96,
+        )
+        return (
+            amount0_desired,
+            amount1_desired,
+            self._minimum(amount0_desired),
+            self._minimum(amount1_desired),
+        )
 
     def _decrease_minimums(self, position, sample) -> tuple[int, int]:
         """按决策轮同区块池价计算 decreaseLiquidity 两腿下限。"""
@@ -205,22 +233,21 @@ class ProductionActions:
         """按链上实际两腿余额补足 50/50 后 mint。"""
         broadcast = require_broadcast_flag(allow_broadcast)
         portfolio = self.reader.read(self.owner, spenders=self._spenders)
-        total_capital_usd, probe_capital_usd = _capital_limits()
-        allowed = self.fact_gate.max_position_usd(
-            total_capital_usd, probe_capital_usd
-        )
-        capital_usd = min(
-            self._available_usd(portfolio, sample.price), allowed
-        )
-        if capital_usd <= 0:
-            raise ActionError(
-                "可用本金为 0，请先在 config/risk.yaml 设置 "
-                "limits.total_capital_usd"
-            )
 
         try:
-            asset_amount, usdc_amount = self._deployment_amounts(
-                portfolio, capital_usd, sample.price
+            budget0, budget1 = self._capital_budget(
+                portfolio, sample.price
+            )
+            asset_amount, usdc_amount = (
+                (budget0, budget1)
+                if self.asset is self.token0 else (budget1, budget0)
+            )
+            capital_limit_usd = (
+                Decimal(asset_amount)
+                / (Decimal(10) ** self.asset.decimals)
+                * sample.price
+                + Decimal(usdc_amount)
+                / (Decimal(10) ** self.usdc.decimals)
             )
             requirement = calculate_50_50_swap(
                 BalanceSnapshot(
@@ -286,24 +313,23 @@ class ProductionActions:
         try:
             if broadcast:
                 current = self.reader.read(self.owner, spenders=self._spenders)
-                mint_capital = min(
-                    capital_usd,
-                    self._available_usd(current, sample.price),
-                )
-                asset_budget, usdc_budget = self._deployment_amounts(
-                    current, mint_capital, sample.price
+                budget0, budget1 = self._capital_budget(
+                    current,
+                    sample.price,
+                    capital_limit_usd=capital_limit_usd,
                 )
             else:
-                asset_budget, usdc_budget = estimated_asset, estimated_usdc
+                budget0, budget1 = self._ordered_amounts(
+                    estimated_asset, estimated_usdc
+                )
                 LOGGER.info("dry-run mint budget 使用 swap 报价估算余额")
-            budget0, budget1 = self._ordered_amounts(
-                asset_budget, usdc_budget
-            )
-            amount0_desired, amount1_desired = mint_amounts_for_budget(
-                budget0,
-                budget1,
-                band.tick_lower,
-                band.tick_upper,
+            (
+                amount0_desired,
+                amount1_desired,
+                amount0_min,
+                amount1_min,
+            ) = self._mint_params(
+                budget0, budget1, band,
                 sample.sqrt_price_x96,
             )
             mint = self.position_manager.mint(
@@ -314,8 +340,8 @@ class ProductionActions:
                 tick_upper=band.tick_upper,
                 amount0_desired=amount0_desired,
                 amount1_desired=amount1_desired,
-                amount0_min=self._minimum(amount0_desired),
-                amount1_min=self._minimum(amount1_desired),
+                amount0_min=amount0_min,
+                amount1_min=amount1_min,
                 recipient=self.owner,
                 deadline=self._deadline(),
             )
@@ -331,6 +357,10 @@ class ProductionActions:
         initial = self.reader.read(self.owner, spenders=self._spenders)
         position = self._active_position(initial)
         amount0_min, amount1_min = self._decrease_minimums(position, sample)
+        selected_balances: BalanceSnapshot | None = None
+        before_swap = None
+        planned_requirement = None
+        planned_swaps = ()
 
         def burn(intent_id: str) -> Intent:
             return self.position_manager.decrease_liquidity(
@@ -350,19 +380,30 @@ class ProductionActions:
             )
 
         def read_balances() -> BalanceSnapshot:
+            nonlocal selected_balances, before_swap, planned_requirement
+            nonlocal planned_swaps
             current = self.reader.read(self.owner, spenders=self._spenders)
-            return BalanceSnapshot(
+            budget0, budget1 = self._capital_budget(
+                current, sample.price
+            )
+            selected_balances = BalanceSnapshot(
                 token0=self.token0.address,
                 token1=self.token1.address,
-                amount0_raw=current.balance0_raw,
-                amount1_raw=current.balance1_raw,
+                amount0_raw=budget0,
+                amount1_raw=budget1,
                 token0_decimals=self.token0.decimals,
                 token1_decimals=self.token1.decimals,
                 price_token1_per_token0=sample.price,
             )
+            before_swap = current
+            planned_requirement = None
+            planned_swaps = ()
+            return selected_balances
 
         def build_swap(requirement, intent_ids):
-            return self.swap_router.plan_exact_input_single(
+            nonlocal planned_requirement, planned_swaps
+            planned_requirement = requirement
+            planned_swaps = self.swap_router.plan_exact_input_single(
                 token_in=requirement.token_in,
                 token_out=requirement.token_out,
                 fee=self.fee,
@@ -372,19 +413,59 @@ class ProductionActions:
                 slippage_bps=self.swap_policy.max_slippage_bps,
                 intent_ids=tuple(intent_ids),
             )
+            return planned_swaps
 
         def mint(intent_id: str) -> Intent:
             current = self.reader.read(self.owner, spenders=self._spenders)
+            if selected_balances is None:
+                budget0, budget1 = self._capital_budget(
+                    current, sample.price
+                )
+            else:
+                budget0 = selected_balances.amount0_raw
+                budget1 = selected_balances.amount1_raw
+                if planned_requirement is not None:
+                    current0 = self._balance_raw(current, self.token0)
+                    current1 = self._balance_raw(current, self.token1)
+                    before0 = self._balance_raw(before_swap, self.token0)
+                    before1 = self._balance_raw(before_swap, self.token1)
+                    quoted_received = sum(
+                        item.quote.amount_out for item in planned_swaps
+                    )
+                    if planned_requirement.token_in == self.token0.address:
+                        budget0 -= planned_requirement.amount_in
+                        actual_received = max(current1 - before1, 0)
+                        swap_applied = current0 < before0
+                        budget1 += (
+                            actual_received if swap_applied
+                            else quoted_received
+                        )
+                    else:
+                        budget1 -= planned_requirement.amount_in
+                        actual_received = max(current0 - before0, 0)
+                        swap_applied = current1 < before1
+                        budget0 += (
+                            actual_received if swap_applied
+                            else quoted_received
+                        )
+            (
+                amount0_desired,
+                amount1_desired,
+                amount0_min,
+                amount1_min,
+            ) = self._mint_params(
+                budget0, budget1, band, sample.sqrt_price_x96
+            )
             return self.position_manager.mint(
                 token0=self.token0.address,
                 token1=self.token1.address,
                 fee=self.fee,
                 tick_lower=band.tick_lower,
                 tick_upper=band.tick_upper,
-                amount0_desired=current.balance0_raw,
-                amount1_desired=current.balance1_raw,
-                amount0_min=self._minimum(current.balance0_raw),
-                amount1_min=self._minimum(current.balance1_raw),
+                amount0_desired=amount0_desired,
+                amount1_desired=amount1_desired,
+                amount0_min=amount0_min,
+                amount1_min=amount1_min,
                 recipient=self.owner,
                 deadline=self._deadline(),
                 intent_id=intent_id,
