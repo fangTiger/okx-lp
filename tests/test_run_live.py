@@ -8,12 +8,15 @@ from unittest.mock import patch
 from eth_account import Account
 
 from okxlp.exec.authorization import RunMode
-from okxlp.strategy.machine_state import MachineState
+from okxlp.strategy.machine_state import (
+    MachineSnapshot, MachineState, MachineStateStore, PriceBand,
+)
 from okxlp.strategy.machine_types import RiskDecision
 from okxlp.strategy.nav import NavSnapshot
+from okxlp.uniswap.tickmath import tick_to_price
 from tools.run_live import (
     LiveRuntime, RiskSettings, _approval_requirements, build_parser,
-    _ensure_startup_write_allowed, main, parse_args,
+    _ensure_startup_write_allowed, _sync_machine_state, main, parse_args,
 )
 
 
@@ -327,6 +330,93 @@ class LiveRuntimeLoopTest(unittest.TestCase):
         self.assertEqual(signer.refreshes, [portfolio.token_ids])
         self.assertEqual(recorder.snapshots, [nav])
         self.assertIn("第 7 次再平衡", "\n".join(output))
+
+
+class RunLiveStateSyncTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        path = Path(self.temporary.name) / "machine_state_pool-1.json"
+        self.store = MachineStateStore(path)
+        self.pool = SimpleNamespace(
+            token0=SimpleNamespace(decimals=18),
+            token1=SimpleNamespace(decimals=6),
+        )
+        self.old_band = PriceBand(
+            -202_980, -202_870, Decimal("1729"), Decimal("1747")
+        )
+        self.position = SimpleNamespace(
+            tick_lower=-201_760,
+            tick_upper=-201_650,
+            liquidity=123_456,
+        )
+
+    def save_transition(self, state):
+        self.store.save(MachineSnapshot(state, self.old_band))
+
+    def test_entering_without_position_resets_to_idle_with_warning(self):
+        self.save_transition(MachineState.ENTERING)
+
+        with self.assertLogs(level="WARNING") as captured:
+            _sync_machine_state(self.store, None, self.pool)
+
+        current = self.store.load()
+        self.assertIs(current.state, MachineState.IDLE)
+        self.assertIsNone(current.band)
+        self.assertIn("本地 ENTERING 但链上无头寸", "\n".join(captured.output))
+
+    def test_entering_with_position_resets_to_chain_band(self):
+        self.save_transition(MachineState.ENTERING)
+
+        with self.assertLogs(level="WARNING") as captured:
+            _sync_machine_state(self.store, self.position, self.pool)
+
+        current = self.store.load()
+        self.assertIs(current.state, MachineState.IN_RANGE)
+        self.assertEqual(current.band.tick_lower, self.position.tick_lower)
+        self.assertEqual(current.band.tick_upper, self.position.tick_upper)
+        self.assertEqual(
+            current.band.price_lower,
+            tick_to_price(self.position.tick_lower, 18, 6),
+        )
+        self.assertEqual(
+            current.band.price_upper,
+            tick_to_price(self.position.tick_upper, 18, 6),
+        )
+        self.assertNotEqual(current.band, self.old_band)
+        self.assertIn("建仓已完成", "\n".join(captured.output))
+
+    def test_exiting_with_position_stays_exiting(self):
+        self.save_transition(MachineState.EXITING)
+        before = self.store.path.read_bytes()
+
+        with self.assertLogs(level="WARNING") as captured:
+            _sync_machine_state(self.store, self.position, self.pool)
+
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.assertIs(self.store.load().state, MachineState.EXITING)
+        self.assertIn("撤出未完成", "\n".join(captured.output))
+
+    def test_exiting_without_position_resets_to_idle(self):
+        self.save_transition(MachineState.EXITING)
+
+        with self.assertLogs(level="WARNING") as captured:
+            _sync_machine_state(self.store, None, self.pool)
+
+        self.assertIs(self.store.load().state, MachineState.IDLE)
+        self.assertIn("撤出已完成", "\n".join(captured.output))
+
+    def test_rebalancing_still_raises_original_error(self):
+        self.save_transition(MachineState.REBALANCING)
+        before = self.store.path.read_bytes()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "本地状态停留在过渡阶段 REBALANCING，需人工对账",
+        ):
+            _sync_machine_state(self.store, None, self.pool)
+
+        self.assertEqual(self.store.path.read_bytes(), before)
 
 
 if __name__ == "__main__":

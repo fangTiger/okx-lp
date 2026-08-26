@@ -58,7 +58,7 @@ class FakeRpc:
 def active_position():
     return OwnedPosition(
         token_id=15_857, token0=TOKEN0, token1=TOKEN1, fee=500,
-        tick_lower=-202_980, tick_upper=-202_870, liquidity=123_456,
+        tick_lower=-201_760, tick_upper=-201_650, liquidity=123_456,
     )
 
 
@@ -81,6 +81,13 @@ class ClearStageLockToolTest(unittest.TestCase):
             "failure": "mint 阶段执行失败：RPC HTTP 错误 403",
             "failed_at": "2026-08-26T03:00:00Z",
         }
+        self.state_path.write_text(
+            json.dumps(self.payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def write_state(self, state):
+        self.payload["state"] = state
         self.state_path.write_text(
             json.dumps(self.payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -114,7 +121,7 @@ class ClearStageLockToolTest(unittest.TestCase):
     def test_wrong_confirmation_returns_nonzero_and_preserves_exact_bytes(self):
         before = self.state_path.read_bytes()
 
-        code, output, reader = self.invoke([], answer="确认")
+        code, output, reader = self.invoke(["--reset-state"], answer="确认")
 
         self.assertNotEqual(code, 0)
         self.assertEqual(self.state_path.read_bytes(), before)
@@ -140,6 +147,80 @@ class ClearStageLockToolTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("警告", output)
         self.assertIn("状态与链上不一致", output)
+
+    def test_reset_entering_without_position_to_idle_and_clears_context(self):
+        code, output, _reader = self.invoke(["--reset-state", "--yes"])
+
+        self.assertEqual(code, 0)
+        reset = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(reset["state"], "IDLE")
+        self.assertIsNone(reset["band"])
+        self.assertIsNone(reset["out_since"])
+        self.assertIsNone(reset["out_direction"])
+        self.assertIsNone(reset["failure"])
+        self.assertIsNone(reset["failed_at"])
+        self.assertIn("当前状态 ENTERING → 复位为 IDLE", output)
+
+    def test_reset_entering_with_position_uses_chain_ticks(self):
+        position = active_position()
+        local_ticks = (
+            self.payload["band"]["tick_lower"],
+            self.payload["band"]["tick_upper"],
+        )
+
+        code, output, _reader = self.invoke(
+            ["--reset-state", "--yes"], positions=(position,),
+        )
+
+        self.assertEqual(code, 0)
+        reset = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(reset["state"], "IN_RANGE")
+        self.assertEqual(
+            (reset["band"]["tick_lower"], reset["band"]["tick_upper"]),
+            (position.tick_lower, position.tick_upper),
+        )
+        self.assertNotEqual(
+            (reset["band"]["tick_lower"], reset["band"]["tick_upper"]),
+            local_ticks,
+        )
+        self.assertIn("当前状态 ENTERING → 复位为 IN_RANGE", output)
+
+    def test_reset_exiting_with_position_preserves_exact_bytes(self):
+        self.write_state("EXITING")
+        before = self.state_path.read_bytes()
+
+        code, output, _reader = self.invoke(
+            ["--reset-state", "--yes"], positions=(active_position(),),
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertIn("当前状态 EXITING → 复位为 EXITING", output)
+        self.assertIn("状态已与链上一致，无需复位", output)
+
+    def test_reset_exiting_without_position_to_idle(self):
+        self.write_state("EXITING")
+
+        code, output, _reader = self.invoke(["--reset-state", "--yes"])
+
+        self.assertEqual(code, 0)
+        reset = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(reset["state"], "IDLE")
+        self.assertIsNone(reset["band"])
+        self.assertIsNone(reset["out_since"])
+        self.assertIsNone(reset["out_direction"])
+        self.assertIn("当前状态 EXITING → 复位为 IDLE", output)
+
+    def test_reset_rebalancing_is_rejected_and_preserves_exact_bytes(self):
+        self.write_state("REBALANCING")
+        before = self.state_path.read_bytes()
+
+        code, output, _reader = self.invoke(["--reset-state", "--yes"])
+
+        self.assertNotEqual(code, 0)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertIn("REBALANCING 处于四阶段中途", output)
+        self.assertIn("log/rebalances/", output)
 
 
 if __name__ == "__main__":

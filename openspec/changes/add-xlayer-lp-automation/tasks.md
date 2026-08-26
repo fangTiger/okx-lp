@@ -129,3 +129,9 @@
 - [x] 16.3 扩展生产入口密钥来源互斥参数、项目根 `.env` 默认选择与来源横幅
 - [x] 16.4 增加 `.env` 忽略规则和可跟踪的占位 `.env.example`
 - [x] 16.5 运行完整单测与敏感加载调用点自查，并保持 `mode: dry_run`
+
+## M17 过渡阶段状态的链上对账复位（批次 11）
+- [x] 17.1 以 TDD 覆盖清锁工具 ENTERING、EXITING、REBALANCING 与兼容模式
+- [x] 17.2 扩展 `clear_stage_lock.py`，支持只读对账后的可选原子状态复位
+- [x] 17.3 放宽生产入口 ENTERING 与 EXITING 启动闸门，并保留 REBALANCING 硬拒绝
+- [x] 17.4 运行完整单测、OpenSpec 校验与 risk/log 红线自查

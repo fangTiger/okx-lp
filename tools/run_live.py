@@ -61,6 +61,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DOTENV_PATH = Path(".env")
 PASSWORD_ENV = "OKXLP_KEYSTORE_PASSWORD"
 WIDTH_TEXT = "±0.5%"
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -360,23 +361,61 @@ class LiveBootstrap:
 
 
 def _sync_machine_state(state_store, active_position, pool) -> None:
-    """仅在稳定阶段以链上头寸修正本地状态；过渡阶段失败关闭。"""
+    """以链上头寸修正可判定状态；再平衡阶段继续失败关闭。"""
     current = state_store.load()
     if current.failure is not None:
         raise RuntimeError(
             f"本地状态处于阶段锁停：{current.failure}，需人工处理"
         )
-    if current.state in (MachineState.ENTERING, MachineState.REBALANCING, MachineState.EXITING):
+    if current.state is MachineState.REBALANCING:
         raise RuntimeError(
             f"本地状态停留在过渡阶段 {current.state.value}，需人工对账"
         )
+    if current.state is MachineState.ENTERING:
+        if active_position is None:
+            LOGGER.warning(
+                "本地 ENTERING 但链上无头寸，判定建仓未完成，"
+                "按链上事实复位为 IDLE"
+            )
+            state_store.save(MachineSnapshot(MachineState.IDLE))
+            return
+        LOGGER.warning(
+            "本地 ENTERING 且链上有流动性头寸，判定建仓已完成，"
+            "按链上真实区间复位为 IN_RANGE"
+        )
+        state_store.save(MachineSnapshot(
+            MachineState.IN_RANGE,
+            _position_band(active_position, pool),
+        ))
+        return
+    if current.state is MachineState.EXITING:
+        if active_position is not None:
+            LOGGER.warning(
+                "本地 EXITING 且链上仍有流动性头寸，判定撤出未完成，"
+                "保持 EXITING 由主循环继续撤出"
+            )
+            return
+        LOGGER.warning(
+            "本地 EXITING 但链上无头寸，判定撤出已完成，"
+            "按链上事实复位为 IDLE"
+        )
+        state_store.save(MachineSnapshot(MachineState.IDLE))
+        return
     if active_position is None:
         if current.state is not MachineState.IDLE:
             state_store.save(MachineSnapshot(MachineState.IDLE))
         return
     if current.state is MachineState.OUT_PENDING:
         return
-    band = PriceBand(
+    state_store.save(MachineSnapshot(
+        MachineState.IN_RANGE,
+        _position_band(active_position, pool),
+    ))
+
+
+def _position_band(active_position, pool) -> PriceBand:
+    """只用链上头寸 tick 重建持久化价格区间。"""
+    return PriceBand(
         active_position.tick_lower, active_position.tick_upper,
         tick_to_price(
             active_position.tick_lower,
@@ -387,7 +426,6 @@ def _sync_machine_state(state_store, active_position, pool) -> None:
             pool.token0.decimals, pool.token1.decimals,
         ),
     )
-    state_store.save(MachineSnapshot(MachineState.IN_RANGE, band))
 
 
 def _render_reconcile(result, printer: Callable[[str], None]) -> None:

@@ -20,11 +20,13 @@ from okxlp.config import load_config
 from okxlp.config_validation import address as validate_address
 from okxlp.config_validation import mapping, required
 from okxlp.exec.reconcile import reconcile_on_startup
-from okxlp.strategy.machine_state import MachineState, MachineStateStore
+from okxlp.strategy.machine_state import (
+    MachineSnapshot, MachineState, MachineStateStore, PriceBand,
+)
 from okxlp.uniswap.pool import SELECTORS as POOL_SELECTORS
 from okxlp.uniswap.pool import _word, decode_int
 from okxlp.uniswap.portfolio import PortfolioReader
-from okxlp.uniswap.tickmath import sqrt_price_x96_to_price
+from okxlp.uniswap.tickmath import sqrt_price_x96_to_price, tick_to_price
 
 
 POOLS_CONFIG_PATH = Path("config/pools.yaml")
@@ -47,6 +49,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="链上对账后清除阶段锁停")
     parser.add_argument("--pool-id", required=True, help="目标池配置 ID")
     parser.add_argument("--owner", required=True, help="需要对账的 EVM 地址")
+    parser.add_argument(
+        "--reset-state", action="store_true",
+        help="按链上本池有效头寸复位可判定的过渡状态",
+    )
     parser.add_argument("--yes", action="store_true", help="跳过交互确认")
     return parser
 
@@ -148,6 +154,49 @@ def _atomic_clear(path: Path) -> None:
         raise
 
 
+def _reset_target(state: MachineState, active_position) -> MachineState:
+    """按链上有效头寸推导可判定的过渡阶段目标。"""
+    if state is MachineState.REBALANCING:
+        raise RuntimeError(
+            "REBALANCING 处于四阶段中途，链上头寸有无不足以判定资金状态，"
+            "必须人工核对 log/rebalances/ 进度与链上交易后手工处理"
+        )
+    if state is MachineState.ENTERING:
+        return (
+            MachineState.IN_RANGE
+            if active_position is not None else MachineState.IDLE
+        )
+    if state is MachineState.EXITING:
+        return (
+            MachineState.EXITING
+            if active_position is not None else MachineState.IDLE
+        )
+    return state
+
+
+def _reset_snapshot(target, active_position, pool) -> MachineSnapshot:
+    """构造已清除锁停字段的复位快照。"""
+    if target is MachineState.IDLE:
+        return MachineSnapshot(MachineState.IDLE)
+    if target is not MachineState.IN_RANGE or active_position is None:
+        raise ValueError(f"状态 {target.value} 无需构造复位快照")
+    band = PriceBand(
+        active_position.tick_lower,
+        active_position.tick_upper,
+        tick_to_price(
+            active_position.tick_lower,
+            pool.token0.decimals,
+            pool.token1.decimals,
+        ),
+        tick_to_price(
+            active_position.tick_upper,
+            pool.token0.decimals,
+            pool.token1.decimals,
+        ),
+    )
+    return MachineSnapshot(MachineState.IN_RANGE, band)
+
+
 def main(
     argv: list[str] | None = None, *,
     context_factory: Callable[[str], Any] | None = None,
@@ -177,12 +226,28 @@ def main(
                 "！！！警告：状态与链上不一致：链上已有本池流动性头寸，"
                 "建议人工核对后再清除"
             )
-        printer(f"清除后系统将进入的状态：{state.state.value}")
+        target = (
+            _reset_target(state.state, result.active_position)
+            if args.reset_state else state.state
+        )
+        printer(f"当前状态 {state.state.value} → 复位为 {target.value}")
         if not args.yes:
             printer(f"请输入“{CONFIRMATION}”；其他输入将退出")
             if input_fn("清除确认：") != CONFIRMATION:
                 printer("确认字符串不匹配，状态文件未修改")
                 return 2
+        if args.reset_state:
+            if target is state.state:
+                printer("状态已与链上一致，无需复位")
+                return 0
+            MachineStateStore(state_path).save(
+                _reset_snapshot(target, result.active_position, context.pool)
+            )
+            printer(
+                f"状态已按链上事实复位为 {target.value}；"
+                "failure 与 failed_at 已置空"
+            )
+            return 0
         _atomic_clear(state_path)
         printer("阶段锁停已清除：failure 与 failed_at 已置空")
         return 0

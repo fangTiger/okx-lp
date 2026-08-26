@@ -354,3 +354,26 @@
 #### Scenario: 默认项目根 dotenv
 - **WHEN** 两个来源均未显式提供且项目根存在 `.env`
 - **THEN** 入口选择 `.env` 路径；项目根不存在 `.env` 时要求显式指定来源
+
+### Requirement: 过渡阶段状态链上对账复位
+系统 MUST 仅依据本池流动性大于零的链上头寸消除 ENTERING 与 EXITING 的歧义，并 MUST 对 REBALANCING 继续失败关闭。
+
+#### Scenario: 建仓阶段按链上事实复位
+- **WHEN** 本地状态为 ENTERING 且链上没有本池有效头寸
+- **THEN** 系统记录中文 warning，并复位为 IDLE，同时清空区间与出界挂起字段
+
+#### Scenario: 建仓已上链时恢复真实区间
+- **WHEN** 本地状态为 ENTERING 且链上存在本池有效头寸
+- **THEN** 系统记录中文 warning，并复位为 IN_RANGE，区间 tick 与价格均由链上头寸重建
+
+#### Scenario: 撤出阶段按链上事实恢复
+- **WHEN** 本地状态为 EXITING 且链上仍有本池有效头寸
+- **THEN** 系统保持 EXITING 供主循环继续撤出；链上已无有效头寸时复位为 IDLE
+
+#### Scenario: 再平衡阶段拒绝自动推导
+- **WHEN** 本地状态为 REBALANCING
+- **THEN** 系统非零退出并要求人工核对 `log/rebalances/` 进度与链上交易，不修改状态文件
+
+#### Scenario: 人工清锁兼容模式
+- **WHEN** 操作者未向清锁工具传入 `--reset-state`
+- **THEN** 工具保持既有行为，只原子清空 failure 与 failed_at
