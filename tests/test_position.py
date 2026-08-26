@@ -45,6 +45,27 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(values[3:5], (-201580, -201470))
         self.assertEqual(values[5:9], (10**15, 1_000_000, 990_000_000_000_000, 990_000))
 
+    def test_mint_accepts_precomputed_band_without_recalculating_ticks(self):
+        intent = self.manager.mint(
+            token0=TOKEN0,
+            token1=TOKEN1,
+            fee=500,
+            tick_lower=-201591,
+            tick_upper=-201463,
+            amount0_desired=10**15,
+            amount1_desired=1_000_000,
+            amount0_min=990_000_000_000_000,
+            amount1_min=990_000,
+            recipient=RECIPIENT,
+            deadline=2_000_000_000,
+        )
+
+        values = decode(
+            ["(address,address,uint24,int24,int24,uint256,uint256,uint256,uint256,address,uint256)"],
+            bytes.fromhex(intent.calldata[10:]),
+        )[0]
+        self.assertEqual(values[3:5], (-201591, -201463))
+
     def test_decrease_liquidity_builds_burn_stage_intent(self):
         intent = self.manager.decrease_liquidity(
             token_id=7,

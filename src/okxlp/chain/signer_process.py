@@ -6,6 +6,7 @@ import json
 import multiprocessing
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -137,6 +138,29 @@ def _signer_worker(
             if request == {"shutdown": True}:
                 return
             try:
+                if set(request) == {"refresh_token_ids"}:
+                    token_ids = request["refresh_token_ids"]
+                    if type(token_ids) is not list:
+                        raise ValueError("refresh_token_ids 必须是列表")
+                    if len(token_ids) > 50:
+                        raise ValueError("refresh_token_ids 数量不得超过 50")
+                    if any(
+                        type(token_id) is not int or token_id < 0
+                        for token_id in token_ids
+                    ):
+                        raise ValueError(
+                            "refresh_token_ids 只能包含非负整数"
+                        )
+                    # tokenId 属于正确性检查而非资金安全检查 —— NPM 合约自身会
+                    # 校验 NFT 归属，对不属于本地址的 tokenId 调用 collect/burn
+                    # 只会 revert，无法转移资金。真正防止资金外流的是 recipient、
+                    # 币对、fee、value=0、chainId、spender 这些锁，它们在子进程中
+                    # 保持不可变，不提供任何刷新入口。
+                    policy = replace(
+                        policy, allowed_token_ids=frozenset(token_ids)
+                    )
+                    _send_message(connection, {"ok": True})
+                    continue
                 if set(request) != {"transaction"}:
                     raise ValueError("签名请求字段集合非法")
                 transaction = _validate_transaction(
@@ -255,6 +279,34 @@ class RemoteSigner:
             return bytes.fromhex(raw)
         except ValueError:
             raise RemoteSignerError("签名子进程返回的 raw 格式非法") from None
+
+    def refresh_token_ids(self, token_ids) -> None:
+        """只替换子进程的 NPM tokenId 正确性集合。"""
+        if self._closed:
+            raise RemoteSignerError("签名子进程已关闭")
+        try:
+            payload = list(token_ids)
+            _send_message(
+                self._connection, {"refresh_token_ids": payload}
+            )
+            response = self._receive("tokenId 刷新请求")
+        except RemoteSignerError:
+            raise
+        except Exception as error:
+            self._terminate()
+            raise RemoteSignerError(
+                f"签名子进程通信失败：{error}"
+            ) from None
+        if response.get("ok") is not True:
+            if set(response) != {"ok", "error"}:
+                self._terminate()
+                raise RemoteSignerError("签名子进程拒绝响应非法")
+            raise RemoteSignerError(
+                str(response.get("error", "tokenId 刷新请求被拒绝"))
+            )
+        if set(response) != {"ok"}:
+            self._terminate()
+            raise RemoteSignerError("签名子进程刷新响应非法")
 
     def _receive(self, action: str) -> dict[str, Any]:
         try:

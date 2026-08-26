@@ -105,3 +105,10 @@
 - [x] 13.3 实现同区块 allowance 驱动的 `ApprovalManager` 并对 Intent 自检
 - [x] 13.4 实现拒绝广播的 `tools/ensure_approvals.py` dry-run 工具
 - [ ] 13.5 运行完整单测、真实链只读验收与 ERC20 多余方法自查
+
+## M14 生产 MachineActions 接线与启动对账（批次 7，仅 dry-run）
+- [x] 14.1 实现启动链上对账，以快照 tokenId 作为唯一白名单来源
+- [x] 14.2 实现 enter、rebalance、exit 生产动作与失败即停顺序
+- [x] 14.3 实现签名子进程 tokenId 集合刷新，保持资金安全锁不可变
+- [x] 14.4 实现拒绝广播的 `tools/preview_actions.py` 全量预览工具
+- [x] 14.5 完成 253 项单测、真实链 enter/exit 只读预览与 M7 dry-run 验收

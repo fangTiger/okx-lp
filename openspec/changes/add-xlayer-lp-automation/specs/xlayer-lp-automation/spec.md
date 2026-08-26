@@ -213,3 +213,47 @@
 #### Scenario: 运行账户读取工具
 - **WHEN** 操作者提供合法 owner 地址运行 CLI
 - **THEN** 工具只使用只读 RPC 并打印账户快照，不构造或发送任何交易
+
+### Requirement: 启动链上对账
+系统 MUST 以同区块账户快照作为启动事实，并将其中全部本池 tokenId 作为 `allowed_token_ids` 的唯一来源。
+
+#### Scenario: 多个历史头寸但仅一个有流动性
+- **WHEN** owner 有多个本池头寸，但只有一个头寸的 liquidity 大于零
+- **THEN** 系统记录 warning，并选择流动性最大的头寸作为 active_position
+
+#### Scenario: 多个有效头寸
+- **WHEN** owner 有两个或更多 liquidity 大于零的本池头寸
+- **THEN** 系统抛出对账错误，要求人工处理
+
+### Requirement: 生产状态机动作接线
+系统 MUST 以严格布尔广播门控执行 enter、rebalance 与 exit；所有 Intent 按规定顺序逐笔交给执行器，任一失败立即停止后续阶段。
+
+#### Scenario: 建仓本金未配置
+- **WHEN** USDC 余额与事实闸门上限的最小值不大于零
+- **THEN** enter 在构造任何 Intent 前失败关闭，并要求设置 `limits.total_capital_usd`
+
+#### Scenario: 建仓完整顺序与参数保护
+- **WHEN** enter 具有正数可用本金
+- **THEN** 必要 approve 全部先于 swap 与 mint，mint 使用状态机传入的 ticks、非零最小数量、owner recipient 和受限 deadline
+
+#### Scenario: 撤出清成 USDC
+- **WHEN** exit 处理唯一有效本池头寸
+- **THEN** 系统依次 decreaseLiquidity、collect、按实际余额把全部标的换成 USDC、burn NFT，并在实盘后检查剩余敞口
+
+### Requirement: 签名子进程 tokenId 刷新
+系统 MUST 接受最多 50 个非负整数 tokenId，并只替换子进程策略的 `allowed_token_ids`；其他安全字段保持不可变且无刷新入口。
+
+#### Scenario: mint 后刷新新 tokenId
+- **WHEN** 主进程把新 tokenId 集合发送给签名子进程
+- **THEN** 新 tokenId 的合法 collect 可签出，但攻击者 recipient 仍被拒绝
+
+#### Scenario: 非法刷新参数
+- **WHEN** 刷新列表含负数、非整数或超过 50 项
+- **THEN** 子进程拒绝刷新并继续使用原策略
+
+### Requirement: 全量动作 dry-run 预览
+系统 MUST 提供要求 `--owner` 和 `--action {enter,exit}` 的只读工具，在启动对账后按顺序打印完整交易内容、总笔数与 gas 预估，且不提供签署或发送路径。
+
+#### Scenario: 请求预览工具广播
+- **WHEN** 操作者传入 `--broadcast`
+- **THEN** 工具以非零状态退出并说明生产入口在批次 8

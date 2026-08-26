@@ -46,14 +46,30 @@ class PositionManager:
         self.address = validate_address(address, "npm.address")
 
     def mint(
-        self, *, token0: str, token1: str, fee: int, current_tick: int,
-        width: Decimal, tick_spacing: int, amount0_desired: int,
+        self, *, token0: str, token1: str, fee: int,
+        current_tick: int | None = None, width: Decimal | None = None,
+        tick_spacing: int | None = None, tick_lower: int | None = None,
+        tick_upper: int | None = None, amount0_desired: int,
         amount1_desired: int, amount0_min: int, amount1_min: int,
         recipient: str, deadline: int, value: int = 0,
         intent_id: str | None = None,
     ) -> Intent:
-        """按 M1 向外对齐 tick 后构造 mint Intent。"""
-        tick_lower, tick_upper = aligned_tick_range(current_tick, width, tick_spacing)
+        """使用预计算区间，或兼容旧调用按 M1 向外对齐区间。"""
+        explicit_range = tick_lower is not None or tick_upper is not None
+        calculated_range = any(
+            value is not None for value in (current_tick, width, tick_spacing)
+        )
+        if explicit_range:
+            if calculated_range or type(tick_lower) is not int or type(tick_upper) is not int:
+                raise ValueError("显式 tick 区间必须成对提供，且不得同时要求重新计算")
+            if tick_lower >= tick_upper:
+                raise ValueError("显式 tick 区间必须满足 tick_lower < tick_upper")
+        else:
+            if current_tick is None or width is None or tick_spacing is None:
+                raise ValueError("必须提供显式 tick 区间或完整的区间计算参数")
+            tick_lower, tick_upper = aligned_tick_range(
+                current_tick, width, tick_spacing
+            )
         values = (
             token0, token1, fee, tick_lower, tick_upper,
             amount0_desired, amount1_desired, amount0_min, amount1_min,

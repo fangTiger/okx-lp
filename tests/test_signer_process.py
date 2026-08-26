@@ -27,9 +27,9 @@ TOKEN_ID = 15857
 MAX_APPROVALS = {TOKEN0: 100 * 10**18, TOKEN1: 200_000 * 10**6}
 
 
-def collect_calldata(recipient: str) -> str:
+def collect_calldata(recipient: str, token_id: int = TOKEN_ID) -> str:
     """构造参数完整的 collect calldata。"""
-    values = (TOKEN_ID, recipient, 2**128 - 1, 2**128 - 1)
+    values = (token_id, recipient, 2**128 - 1, 2**128 - 1)
     return "0xfc6f7865" + encode(
         ["(uint256,address,uint128,uint128)"], [values]
     ).hex()
@@ -201,6 +201,45 @@ class RemoteSignerTest(unittest.TestCase):
 
         with self.assertRaisesRegex(RemoteSignerError, "已关闭"):
             signer.sign_transaction(self._transaction())
+
+    def test_refresh_token_ids_allows_new_collect_but_keeps_recipient_lock(self):
+        signer = self._signer()
+        new_token_id = TOKEN_ID + 1
+
+        signer.refresh_token_ids([new_token_id])
+
+        legal = self._transaction(
+            data=collect_calldata(self.account.address, new_token_id)
+        )
+        raw = signer.sign_transaction(legal)
+        self.assertEqual(Account.recover_transaction(raw), self.account.address)
+
+        attack = self._transaction(
+            data=collect_calldata(ATTACKER, new_token_id)
+        )
+        with self.assertRaisesRegex(RemoteSignerError, "recipient"):
+            signer.sign_transaction(attack)
+
+        with self.assertRaisesRegex(RemoteSignerError, "tokenId"):
+            signer.sign_transaction(self._transaction())
+
+    def test_refresh_token_ids_rejects_invalid_lists_and_preserves_policy(self):
+        signer = self._signer()
+        invalid_values = (
+            [-1],
+            [True],
+            ["15858"],
+            list(range(51)),
+        )
+
+        for token_ids in invalid_values:
+            with self.subTest(token_ids=token_ids):
+                with self.assertRaises(RemoteSignerError):
+                    signer.refresh_token_ids(token_ids)
+                raw = signer.sign_transaction(self._transaction())
+                self.assertEqual(
+                    Account.recover_transaction(raw), self.account.address
+                )
 
     def test_broken_pipe_marks_signer_closed_and_reclaims_child(self):
         class BrokenConnection:
