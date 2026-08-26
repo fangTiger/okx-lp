@@ -1,16 +1,19 @@
+import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from eth_account import Account
+
 from okxlp.exec.authorization import RunMode
 from okxlp.strategy.machine_state import MachineState
 from okxlp.strategy.machine_types import RiskDecision
 from okxlp.strategy.nav import NavSnapshot
 from tools.run_live import (
-    LiveRuntime, RiskSettings, _approval_requirements,
-    _ensure_startup_write_allowed, main,
+    LiveRuntime, RiskSettings, _approval_requirements, build_parser,
+    _ensure_startup_write_allowed, main, parse_args,
 )
 
 
@@ -116,13 +119,16 @@ class RunLiveGateTest(unittest.TestCase):
     ):
         output = []
         calls = []
+        arguments = list(argv)
+        if "--keystore" not in arguments and "--dotenv" not in arguments:
+            arguments.extend(["--keystore", "secrets/test-keystore.json"])
 
         def factory(*_args, **_kwargs):
             calls.append("bootstrap")
             return bootstrap or FakeBootstrap()
 
         code = main(
-            argv,
+            arguments,
             run_mode_loader=lambda: mode,
             risk_loader=settings,
             bootstrap_factory=factory,
@@ -130,6 +136,49 @@ class RunLiveGateTest(unittest.TestCase):
             printer=output.append,
         )
         return code, "\n".join(output), calls
+
+    def test_key_source_flags_are_mutually_exclusive_at_argparse_layer(self):
+        with self.assertRaises(SystemExit) as caught:
+            build_parser().parse_args([
+                "--owner", OWNER,
+                "--keystore", "temporary-keystore.json",
+                "--dotenv", "temporary.env",
+            ])
+
+        self.assertNotEqual(caught.exception.code, 0)
+
+    def test_missing_source_defaults_to_project_root_dotenv(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dotenv = root / ".env"
+            account = Account.create()
+            dotenv.write_text(
+                f"OKXLP_PRIVATE_KEY=0x{account.key.hex()}\n",
+                encoding="utf-8",
+            )
+            dotenv.chmod(0o600)
+
+            args = parse_args(["--owner", OWNER], project_root=root)
+
+        self.assertIsNone(args.keystore)
+        self.assertEqual(args.dotenv, dotenv.resolve())
+
+    def test_missing_source_without_project_dotenv_is_argparse_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(SystemExit) as caught:
+                parse_args(["--owner", OWNER], project_root=Path(directory))
+
+        self.assertNotEqual(caught.exception.code, 0)
+
+    def test_dotenv_source_path_is_printed_in_banner(self):
+        code, output, _calls = self.invoke(
+            ["--owner", OWNER, "--dotenv", "temporary.env"],
+            mode=RunMode.DRY_RUN,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertIn("dotenv", output.lower())
+        self.assertIn("temporary.env", output)
 
     def test_dry_run_mode_with_broadcast_exits_before_any_rpc_setup(self):
         code, output, calls = self.invoke(

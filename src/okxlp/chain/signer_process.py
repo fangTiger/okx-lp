@@ -111,12 +111,31 @@ def _validate_transaction(
 
 
 def _signer_worker(
-    connection: Any, keystore_path: str, password_env: str,
-    chain_id: int, execution_path: str, policy_payload: dict,
+    connection: Any, keystore_path: str | None, password_env: str | None,
+    dotenv_path: str | None, dotenv_var: str | None, chain_id: int,
+    execution_path: str, policy_payload: dict,
 ) -> None:
     """在全新解释器中持有私钥，且仅返回地址或签名结果。"""
     try:
-        signer = KeystoreSigner(keystore_path, password_env=password_env)
+        has_keystore = bool(keystore_path)
+        has_password = bool(password_env)
+        has_dotenv = bool(dotenv_path)
+        if has_keystore != has_password or has_keystore == has_dotenv:
+            raise ValueError("keystore 与 dotenv 密钥来源必须恰好提供一组")
+        if has_keystore:
+            signer = KeystoreSigner(
+                keystore_path, password_env=password_env or ""
+            )
+        else:
+            if type(dotenv_var) is not str or not dotenv_var:
+                raise ValueError("dotenv 变量名必须是非空字符串")
+            from okxlp.chain.dotenv import load_private_key
+
+            private_key = load_private_key(Path(dotenv_path or ""), dotenv_var)
+            try:
+                signer = KeystoreSigner.from_private_key(private_key)
+            finally:
+                del private_key
         policy = CalldataPolicy(**policy_payload)
         _send_message(connection, {"ok": True, "address": signer.address})
     except Exception as error:
@@ -188,14 +207,25 @@ class RemoteSigner:
     )
 
     def __init__(
-        self, *, keystore_path: str | Path, password_env: str, chain_id: int,
+        self, *, keystore_path: str | Path | None = None,
+        password_env: str | None = None,
+        dotenv_path: str | Path | None = None,
+        dotenv_var: str = "OKXLP_PRIVATE_KEY", chain_id: int,
         execution_path: str | Path, calldata_policy: CalldataPolicy,
         timeout_seconds: float = 30.0,
     ) -> None:
+        has_keystore = keystore_path is not None
+        has_dotenv = dotenv_path is not None
         if (
-            type(chain_id) is not int
-            or type(password_env) is not str
-            or not password_env
+            has_keystore == has_dotenv
+            or (has_keystore and (
+                type(password_env) is not str or not password_env
+            ))
+            or (has_dotenv and password_env is not None)
+            or (has_dotenv and (
+                type(dotenv_var) is not str or not dotenv_var
+            ))
+            or type(chain_id) is not int
             or type(timeout_seconds) not in (int, float)
             or type(timeout_seconds) is bool
             or timeout_seconds <= 0
@@ -222,8 +252,12 @@ class RemoteSigner:
         self._process = context.Process(
             target=_signer_worker,
             args=(
-                child_connection, str(keystore_path), password_env, chain_id,
-                str(execution_path), payload,
+                child_connection,
+                None if keystore_path is None else str(keystore_path),
+                password_env,
+                None if dotenv_path is None else str(dotenv_path),
+                dotenv_var,
+                chain_id, str(execution_path), payload,
             ),
             daemon=True,
         )

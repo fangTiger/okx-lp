@@ -57,6 +57,8 @@ from okxlp.uniswap.tickmath import (
 POOLS_PATH = Path("config/pools.yaml")
 RISK_PATH = Path("config/risk.yaml")
 EXECUTION_PATH = Path("config/execution.yaml")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_DOTENV_PATH = Path(".env")
 PASSWORD_ENV = "OKXLP_KEYSTORE_PASSWORD"
 WIDTH_TEXT = "±0.5%"
 
@@ -442,12 +444,19 @@ def create_bootstrap(
     )
     signer: RemoteSigner | None = None
     try:
+        key_source = (
+            {"dotenv_path": args.dotenv}
+            if args.dotenv is not None
+            else {
+                "keystore_path": args.keystore,
+                "password_env": PASSWORD_ENV,
+            }
+        )
         signer = RemoteSigner(
-            keystore_path=args.keystore,
-            password_env=PASSWORD_ENV,
             chain_id=config.chain.chain_id,
             execution_path=EXECUTION_PATH,
             calldata_policy=policy,
+            **key_source,
         )
         _ensure_owner(signer, args.owner)
         executor = TransactionExecutor(
@@ -476,9 +485,14 @@ def build_parser() -> argparse.ArgumentParser:
         description="X Layer LP 生产状态机入口（默认不广播）"
     )
     parser.add_argument("--owner", required=True, help="生产钱包地址")
-    parser.add_argument(
-        "--keystore", type=Path, default=Path("secrets/keystore.json"),
+    key_source = parser.add_mutually_exclusive_group()
+    key_source.add_argument(
+        "--keystore", type=Path,
         help="keystore 路径",
+    )
+    key_source.add_argument(
+        "--dotenv", type=Path,
+        help="明文私钥 .env 路径",
     )
     parser.add_argument(
         "--broadcast", action="store_true",
@@ -492,6 +506,23 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def parse_args(
+    argv: list[str] | None = None, *, project_root: Path = PROJECT_ROOT,
+):
+    """解析互斥密钥来源，并处理项目根 `.env` 的唯一默认值。"""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.keystore is None and args.dotenv is None:
+        default_dotenv = project_root / DEFAULT_DOTENV_PATH
+        if default_dotenv.exists():
+            args.dotenv = default_dotenv.resolve()
+        else:
+            parser.error(
+                "必须显式指定 --keystore 或 --dotenv；项目根不存在 .env"
+            )
+    return args
+
+
 def _banner(args, mode, settings, allow_broadcast, printer) -> None:
     printer("=== OKX LP 生产入口 ===")
     printer(f"owner：{args.owner}")
@@ -501,7 +532,10 @@ def _banner(args, mode, settings, allow_broadcast, printer) -> None:
     printer(f"区间宽度：{WIDTH_TEXT}")
     printer(f"每日再平衡上限：{settings.max_rebalances_per_day}")
     printer(f"HALT 文件：{settings.halt_file}")
-    printer(f"keystore 路径：{args.keystore}")
+    if args.dotenv is not None:
+        printer(f"签名来源：dotenv；路径：{args.dotenv}")
+    else:
+        printer(f"签名来源：keystore；路径：{args.keystore}")
 
 
 def _ensure_owner(signer, owner: str) -> None:
@@ -522,8 +556,7 @@ def main(
     printer: Callable[[str], None] = print,
 ) -> int:
     """启动生产循环；任何退出路径都回收独立签名子进程。"""
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parse_args(argv)
     bootstrap = None
     runtime = None
     try:

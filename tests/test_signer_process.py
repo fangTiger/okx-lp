@@ -70,6 +70,12 @@ class RemoteSignerTest(unittest.TestCase):
             json.dumps(Account.encrypt(self.account.key, self.password)),
             encoding="utf-8",
         )
+        self.dotenv = Path(self.directory.name) / ".env"
+        self.dotenv.write_text(
+            f"OKXLP_PRIVATE_KEY=0x{self.account.key.hex()}\n",
+            encoding="utf-8",
+        )
+        os.chmod(self.dotenv, 0o600)
         self.execution_path = Path("config/execution.yaml").resolve()
 
     def _policy(self) -> CalldataPolicy:
@@ -98,6 +104,16 @@ class RemoteSignerTest(unittest.TestCase):
         self.addCleanup(signer.close)
         return signer
 
+    def _dotenv_signer(self) -> RemoteSigner:
+        signer = RemoteSigner(
+            dotenv_path=self.dotenv,
+            chain_id=CHAIN_ID,
+            execution_path=self.execution_path,
+            calldata_policy=self._policy(),
+        )
+        self.addCleanup(signer.close)
+        return signer
+
     def _transaction(
         self, *, recipient=None, to=NPM, chain_id=CHAIN_ID, data=None
     ):
@@ -120,6 +136,54 @@ class RemoteSignerTest(unittest.TestCase):
 
         self.assertEqual(signer.address, self.account.address)
         self.assertEqual(Account.recover_transaction(raw), self.account.address)
+
+    def test_dotenv_signs_legal_collect_and_rejects_attacker_recipient(self):
+        signer = self._dotenv_signer()
+
+        raw = signer.sign_transaction(self._transaction())
+
+        self.assertEqual(signer.address, self.account.address)
+        self.assertEqual(Account.recover_transaction(raw), self.account.address)
+        with self.assertRaisesRegex(RemoteSignerError, "recipient"):
+            signer.sign_transaction(self._transaction(recipient=ATTACKER))
+
+    def test_dotenv_parent_object_graph_does_not_hold_private_key(self):
+        signer = self._dotenv_signer()
+        values = list(getattr(signer, "__dict__", {}).values())
+        for current_class in type(signer).__mro__:
+            slots = getattr(current_class, "__slots__", ())
+            if isinstance(slots, str):
+                slots = (slots,)
+            for name in slots:
+                if hasattr(signer, name):
+                    values.append(getattr(signer, name))
+
+        leaked = False
+        for value in values:
+            leaked = leaked or value == self.account.key
+            if inspect.isfunction(value) and value.__closure__:
+                leaked = leaked or any(
+                    cell.cell_contents == self.account.key
+                    for cell in value.__closure__
+                )
+        self.assertFalse(leaked, "主进程对象图包含临时私钥")
+
+    def test_requires_exactly_one_key_source(self):
+        common = {
+            "chain_id": CHAIN_ID,
+            "execution_path": self.execution_path,
+            "calldata_policy": self._policy(),
+        }
+
+        with self.assertRaises(RemoteSignerError):
+            RemoteSigner(
+                keystore_path=self.keystore,
+                password_env=self.env_name,
+                dotenv_path=self.dotenv,
+                **common,
+            )
+        with self.assertRaises(RemoteSignerError):
+            RemoteSigner(**common)
 
     def test_parent_attributes_and_function_closures_do_not_hold_private_key(self):
         signer = self._signer()

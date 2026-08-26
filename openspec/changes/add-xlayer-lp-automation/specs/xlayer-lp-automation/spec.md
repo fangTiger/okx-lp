@@ -317,3 +317,40 @@
 #### Scenario: 签名地址不一致
 - **WHEN** keystore 推导的 signer.address 与 owner 不一致
 - **THEN** 入口立即退出且不进入循环
+
+### Requirement: `.env` 明文私钥安全加载
+系统 MUST 只在签名子进程内从 `.env` 读取指定变量，并在解析前拒绝不存在、group/other 权限非零或已被 Git 跟踪的文件；私钥值 MUST 是可选 `0x` 前缀加恰好 64 位十六进制，任何错误均不得回显敏感内容。
+
+#### Scenario: 安全文件中的合法变量
+- **WHEN** 权限为 600 或 400 且未被 Git 跟踪的 `.env` 包含合法私钥变量
+- **THEN** 签名子进程得到 32 字节私钥并完成握手，主进程只持有路径和变量名
+
+#### Scenario: 文件安全前置检查失败
+- **WHEN** `.env` 不存在、group/other 权限非零或已被 Git 跟踪
+- **THEN** 系统在解析内容前硬性拒绝，并给出不含敏感值的中文修复提示
+
+#### Scenario: 私钥变量缺失或格式非法
+- **WHEN** 指定变量不存在、为空或不是恰好 64 位十六进制
+- **THEN** 系统拒绝加载且错误消息不包含实际值或其片段
+
+### Requirement: 互斥签名密钥来源
+系统 MUST 要求 keystore 路径与口令环境变量、或 dotenv 路径与变量名这两组来源恰好提供一组；dotenv 加载函数 MUST 只在签名子进程函数内部调用，既有交易二道门校验保持不变。
+
+#### Scenario: dotenv 端到端签名
+- **WHEN** 签名子进程从安全 `.env` 启动并收到合法 collect 交易
+- **THEN** 签名可恢复到该临时账户地址；攻击者 recipient 仍被子进程拒绝
+
+#### Scenario: 来源同时提供或均未提供
+- **WHEN** 调用方同时提供 keystore 与 dotenv，或两者均不提供
+- **THEN** 主进程拒绝构造 RemoteSigner，子进程边界也拒绝非法握手参数
+
+### Requirement: 生产入口选择签名来源
+系统 MUST 在 argparse 层要求 `--keystore` 与 `--dotenv` 互斥；未显式提供时仅当项目根存在 `.env` 才默认使用该文件，并在启动横幅中只打印来源路径。
+
+#### Scenario: 同时指定两个来源
+- **WHEN** 操作者同时传入 `--keystore` 与 `--dotenv`
+- **THEN** argparse 以非零状态退出且不启动 RPC、签名子进程或状态机
+
+#### Scenario: 默认项目根 dotenv
+- **WHEN** 两个来源均未显式提供且项目根存在 `.env`
+- **THEN** 入口选择 `.env` 路径；项目根不存在 `.env` 时要求显式指定来源
