@@ -16,6 +16,9 @@ limits:
   mint_min_deposit_bps: 5000   # mint 模拟结果中，实际存入价值相对本轮预算的下限。
                                # 取代 per-leg minimum：后者在窄区间下需 >9000bps 容差
                                # 才能容纳 ±0.4% 价格移动，等同无保护。
+  decrease_min_withdraw_bps: 5000   # decreaseLiquidity 模拟结果中，实际取出价值
+                                    # 相对该头寸当前估值的下限。取代 per-leg minimum：
+                                    # 后者在窄区间下随价格剧烈摆动，数学上不成立。
 
 swap:
   min_amount_usd: 1                 # 低于 1 USD 的 50/50 差额视为粉尘

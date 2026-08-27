@@ -1,7 +1,9 @@
 import inspect
+import tempfile
 import unittest
 from dataclasses import replace
 from decimal import Decimal, ROUND_FLOOR
+from pathlib import Path
 from types import SimpleNamespace
 
 from eth_abi import decode, encode
@@ -13,6 +15,7 @@ from okxlp.strategy.actions import ActionError, ProductionActions
 from okxlp.strategy.allocation import calculate_50_50_swap, quote_value
 from okxlp.strategy.machine_state import PriceBand
 from okxlp.strategy.machine_types import MarketSample
+from okxlp.strategy.rebalance import RebalanceJournal, RebalanceOrchestrator
 from okxlp.uniswap.portfolio import OwnedPosition, PortfolioSnapshot
 from okxlp.uniswap.position import PositionManager
 from okxlp.uniswap.swap import ScheduledSwap, SwapPolicy, SwapQuote
@@ -27,6 +30,8 @@ NPM = "0x315e413a11ab0df498ef83873012430ca36638ae"
 ROUTER = "0x4f0c28f5926afda16bf2506d5d9e57ea190f9bca"
 TOKEN0 = "0x9147b03c16b18fc4f686f610f189f91ddf4347b4"
 TOKEN1 = "0xb6ceceab302e2e4948951ee7843fc24e92933061"
+USDG = "0x4ae46a509f6b1d9056937ba4500cb143933d2dc8"
+WMRNAX = "0xce0fbc16e820ab7fd6d2936f1533c2654ad49ae9"
 SAMPLE = MarketSample(
     Decimal("2000"), -201_526,
     price_to_sqrt_price_x96(Decimal("2000"), 18, 6),
@@ -71,6 +76,17 @@ POOL = SimpleNamespace(
     quote_leg="token1",
     quote_token=QUOTE_TOKEN,
     base_token=BASE_TOKEN,
+    fee_bps=Decimal("5"),
+    tick_spacing=10,
+)
+USDG_TOKEN = SimpleNamespace(address=USDG, symbol="USDG", decimals=6)
+WMRNAX_TOKEN = SimpleNamespace(address=WMRNAX, symbol="wMRNAx", decimals=18)
+WMRNAX_POOL = SimpleNamespace(
+    token0=USDG_TOKEN,
+    token1=WMRNAX_TOKEN,
+    quote_leg="token0",
+    quote_token=USDG_TOKEN,
+    base_token=WMRNAX_TOKEN,
     fee_bps=Decimal("5"),
     tick_spacing=10,
 )
@@ -258,6 +274,25 @@ def sample_at_tick(tick):
     price = tick_to_price(tick, 18, 6)
     return MarketSample(
         price, tick, price_to_sqrt_price_x96(price, 18, 6)
+    )
+
+
+def wmrnax_sample_at_tick(tick):
+    price = tick_to_price(tick, 6, 18)
+    return MarketSample(
+        price, tick, price_to_sqrt_price_x96(price, 6, 18)
+    )
+
+
+def wmrnax_position() -> OwnedPosition:
+    return OwnedPosition(
+        token_id=18_761,
+        token0=USDG,
+        token1=WMRNAX,
+        fee=500,
+        tick_lower=226_280,
+        tick_upper=226_390,
+        liquidity=3_523_927_010_382_011,
     )
 
 
@@ -662,26 +697,96 @@ class ProductionEnterTest(unittest.TestCase):
 
 
 class ProductionExitTest(unittest.TestCase):
-    def test_in_range_decrease_uses_exact_slippage_minimums(self):
-        position = owned_position(liquidity=21_126_254_269_852)
-        sample = sample_at_tick(-201_525)
+    def test_incident_decrease_uses_zero_minimums_after_price_returns_to_range(self):
+        position = wmrnax_position()
+        outside = wmrnax_sample_at_tick(226_250)
+        inside = wmrnax_sample_at_tick(226_308)
+        actions, _dependencies = make_actions(pool=WMRNAX_POOL)
+
+        self.assertEqual(actions._decrease_minimums(position, outside), (0, 0))
+        self.assertEqual(actions._decrease_minimums(position, inside), (0, 0))
+
+        outside_amounts = position_amounts(
+            position.liquidity,
+            position.tick_lower,
+            position.tick_upper,
+            outside.sqrt_price_x96,
+        )
+        inside_amounts = position_amounts(
+            position.liquidity,
+            position.tick_lower,
+            position.tick_upper,
+            inside.sqrt_price_x96,
+        )
+        old_outside_minimum0 = expected_minimum(outside_amounts[0])
+        self.assertGreater(old_outside_minimum0, 0)
+        self.assertLess(inside_amounts[0], old_outside_minimum0)
+
+    def test_decrease_simulation_check_accepts_90_percent_and_rejects_40(self):
+        position = wmrnax_position()
+        sample = wmrnax_sample_at_tick(226_308)
+        actions, _dependencies = make_actions(pool=WMRNAX_POOL)
+        expected = position_amounts(
+            position.liquidity,
+            position.tick_lower,
+            position.tick_upper,
+            sample.sqrt_price_x96,
+        )
+        check = actions._decrease_simulation_check(position, sample)
+
+        def result(numerator):
+            amounts = tuple(value * numerator // 10_000 for value in expected)
+            return "0x" + encode(
+                ["uint256", "uint256"], amounts
+            ).hex()
+
+        check(result(9_000))
+        with self.assertRaisesRegex(
+            ActionError, "模拟实得.*预期.*5000 bps"
+        ):
+            check(result(4_000))
+
+    def test_exit_decrease_passes_simulation_check_to_executor(self):
         reader = SequenceReader(
-            snapshot(positions=(position,)),
+            snapshot(positions=(owned_position(),)),
             snapshot(positions=(owned_position(0),)),
         )
         actions, dependencies = make_actions(reader=reader)
 
-        actions.exit(sample)
+        actions.exit(SAMPLE)
 
         values = decode_decrease(dependencies.executor.intents[0])
-        expected0, expected1 = position_amounts(
-            position.liquidity, position.tick_lower,
-            position.tick_upper, sample.sqrt_price_x96,
+        self.assertEqual(values[2:4], (0, 0))
+        self.assertIsNotNone(dependencies.executor.simulation_checks[0])
+
+    def test_exit_decrease_check_uses_fresh_pool_snapshot_price(self):
+        position = wmrnax_position()
+        samples = (
+            wmrnax_sample_at_tick(226_250),
+            wmrnax_sample_at_tick(227_000),
         )
-        self.assertGreater(values[2], 0)
-        self.assertGreater(values[3], 0)
-        self.assertEqual(values[2], expected_minimum(expected0))
-        self.assertEqual(values[3], expected_minimum(expected1))
+        reads = []
+
+        def read_pool():
+            sample = samples[min(len(reads), len(samples) - 1)]
+            reads.append(sample)
+            return sample
+
+        initial = read_pool()
+        reader = SequenceReader(
+            snapshot(positions=(position,)),
+            snapshot(balance0=0, balance1=0, positions=(replace(position, liquidity=0),)),
+        )
+        actions, dependencies = make_actions(
+            reader=reader, pool_snapshot_reader=read_pool, pool=WMRNAX_POOL,
+        )
+
+        actions.exit(initial)
+
+        check = dependencies.executor.simulation_checks[0]
+        self.assertIsNotNone(check)
+        check("0x" + encode(["uint256", "uint256"], [112_000_000, 0]).hex())
+        self.assertEqual(reads, list(samples))
 
     def test_exit_orders_decrease_collect_swap_and_burn(self):
         reader = SequenceReader(
@@ -1046,7 +1151,7 @@ class ProductionRebalanceActionsTest(unittest.TestCase):
         self.assertEqual(mint[5:7], expected)
         self.assertEqual(mint[7:9], (0, 0))
 
-    def test_below_range_decrease_allows_zero_token1_minimum(self):
+    def test_below_range_decrease_uses_two_zero_minimums(self):
         position = owned_position(liquidity=21_126_254_269_852)
         sample = sample_at_tick(position.tick_lower - 10)
         actions, _dependencies = make_actions(
@@ -1057,10 +1162,9 @@ class ProductionRebalanceActionsTest(unittest.TestCase):
             actions.rebalance_actions(sample, BAND).burn("1" * 32)
         )
 
-        self.assertGreater(values[2], 0)
-        self.assertEqual(values[3], 0)
+        self.assertEqual(values[2:4], (0, 0))
 
-    def test_above_range_decrease_allows_zero_token0_minimum(self):
+    def test_above_range_decrease_uses_two_zero_minimums(self):
         position = owned_position(liquidity=21_126_254_269_852)
         sample = sample_at_tick(position.tick_upper + 10)
         actions, _dependencies = make_actions(
@@ -1071,10 +1175,9 @@ class ProductionRebalanceActionsTest(unittest.TestCase):
             actions.rebalance_actions(sample, BAND).burn("2" * 32)
         )
 
-        self.assertEqual(values[2], 0)
-        self.assertGreater(values[3], 0)
+        self.assertEqual(values[2:4], (0, 0))
 
-    def test_nonzero_liquidity_never_encodes_two_zero_minimums(self):
+    def test_decrease_uses_two_zero_minimums_at_every_price(self):
         position = owned_position(liquidity=21_126_254_269_852)
         for tick in (
             position.tick_lower - 10,
@@ -1089,7 +1192,29 @@ class ProductionRebalanceActionsTest(unittest.TestCase):
                 values = decode_decrease(
                     actions.rebalance_actions(sample, BAND).burn("3" * 32)
                 )
-                self.assertNotEqual(values[2:4], (0, 0))
+                self.assertEqual(values[2:4], (0, 0))
+
+    def test_rebalance_burn_passes_simulation_check_to_executor(self):
+        executor = RecordingExecutor()
+        reader = SequenceReader(snapshot(positions=(owned_position(),)))
+        actions, _dependencies = make_actions(
+            reader=reader,
+            executor=executor,
+            pool_snapshot_reader=lambda: SAMPLE,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            orchestrator = RebalanceOrchestrator(
+                executor=executor,
+                journal=RebalanceJournal(Path(directory)),
+                min_swap_usd=Decimal("1000000"),
+            )
+
+            orchestrator.execute(
+                actions.rebalance_actions(SAMPLE, BAND),
+                rebalance_id="decrease-check",
+            )
+
+        self.assertIsNotNone(executor.simulation_checks[0])
 
     def test_callbacks_use_current_position_ids_balances_and_preallocated_ids(self):
         reader = SequenceReader(

@@ -26,6 +26,7 @@ LOGGER = logging.getLogger(__name__)
 BPS = Decimal("10000")
 RISK_PATH = Path("config/risk.yaml")
 DEFAULT_MINT_MIN_DEPOSIT_BPS = 5_000
+DEFAULT_DECREASE_MIN_WITHDRAW_BPS = 5_000
 
 
 class ActionError(RuntimeError):
@@ -63,6 +64,7 @@ class ProductionActions:
         self.dust_threshold_raw = dust_threshold_raw
         self.pool_snapshot_reader = pool_snapshot_reader
         self.mint_min_deposit_bps = _mint_min_deposit_bps()
+        self.decrease_min_withdraw_bps = _decrease_min_withdraw_bps()
         self.token0 = pool.token0
         self.token1 = pool.token1
         self.quote_token = pool.quote_token
@@ -242,32 +244,72 @@ class ProductionActions:
         return check
 
     def _decrease_minimums(self, position, sample) -> tuple[int, int]:
-        """按决策轮同区块池价计算 decreaseLiquidity 两腿下限。"""
-        sqrt_price_x96 = getattr(sample, "sqrt_price_x96", None)
-        if type(sqrt_price_x96) is not int or sqrt_price_x96 <= 0:
-            raise ActionError("决策池快照缺少有效 sqrt_price_x96，拒绝撤流动性")
+        """返回 decreaseLiquidity 固定双零 minimum。"""
+        # 对窄区间头寸，mint 与 decreaseLiquidity 的 per-leg minimum
+        # 都只是比例约束，而币种比例会随区间内价格移动剧烈摆动，数学上
+        # 无法设置稳定下限。两者也都不是交易：流动性与价格决定存取价值，
+        # 价格变化只改变币种构成，不能凭空窃取价值。真正的保护是校验
+        # simulation_check 返回的实际总价值，而不是约束旧快照猜测的比例。
+        # exactInputSingle 例外：amountOutMinimum 是汇率保护，必须保持正数。
+        return 0, 0
+
+    def _latest_decrease_sample(self):
+        """在 decreaseLiquidity 构造前读取并校验最新池快照。"""
+        try:
+            latest = self.pool_snapshot_reader()
+        except Exception as error:
+            reason = str(error) or error.__class__.__name__
+            raise ActionError(f"读取最新池快照失败：{reason}") from error
+        price = getattr(latest, "price", None)
+        sqrt_price_x96 = getattr(latest, "sqrt_price_x96", None)
+        if (
+            not isinstance(price, Decimal)
+            or not price.is_finite()
+            or price <= 0
+            or type(sqrt_price_x96) is not int
+            or sqrt_price_x96 <= 0
+        ):
+            raise ActionError("最新池快照缺少有效 price 或 sqrt_price_x96")
+        return latest
+
+    def _decrease_simulation_check(
+        self, position, sample,
+    ) -> Callable[[str], None]:
+        """按 decreaseLiquidity 模拟返回的两腿数量检查取出总价值。"""
         expected0, expected1 = position_amounts(
             position.liquidity,
             position.tick_lower,
             position.tick_upper,
-            sqrt_price_x96,
+            sample.sqrt_price_x96,
+        )
+        expected_usd = self._quote_value(expected0, expected1, sample.price)
+        minimum_usd = (
+            expected_usd * Decimal(self.decrease_min_withdraw_bps) / BPS
         )
 
-        def protected(expected: int) -> int:
-            return int(
-                (
-                    Decimal(expected)
-                    * (BPS - self.swap_policy.max_slippage_bps)
-                    / BPS
-                ).to_integral_value(rounding=ROUND_FLOOR)
-            )
+        def check(raw_result: str) -> None:
+            try:
+                if type(raw_result) is not str or not raw_result.startswith("0x"):
+                    raise ValueError("不是 hex 字符串")
+                payload = bytes.fromhex(raw_result[2:])
+                if len(payload) != 64:
+                    raise ValueError(f"期望 64 字节，实际 {len(payload)} 字节")
+                amount0, amount1 = decode(
+                    ["uint256", "uint256"], payload, strict=True
+                )
+            except Exception as error:
+                raise ActionError(
+                    f"decreaseLiquidity 模拟返回值无法按 ABI 解码：{error}"
+                ) from error
+            withdrawn_usd = self._quote_value(amount0, amount1, sample.price)
+            if withdrawn_usd < minimum_usd:
+                raise ActionError(
+                    f"decreaseLiquidity 模拟实得 {withdrawn_usd} USD，"
+                    f"预期 {expected_usd} USD，低于阈值 "
+                    f"{self.decrease_min_withdraw_bps} bps（{minimum_usd} USD）"
+                )
 
-        minimums = protected(expected0), protected(expected1)
-        if position.liquidity > 0 and minimums == (0, 0):
-            raise ActionError(
-                "非零流动性头寸的两腿滑点下限均为 0，拒绝无保护撤出"
-            )
-        return minimums
+        return check
 
     def _execute(
         self, intent: Intent, stage: str, broadcast: bool,
@@ -448,14 +490,20 @@ class ProductionActions:
         """返回沿用 burn 阶段名的 decrease、collect、swap、mint 回调。"""
         initial = self.reader.read(self.owner, spenders=self._spenders)
         position = self._active_position(initial)
-        amount0_min, amount1_min = self._decrease_minimums(position, sample)
         selected_balances: BalanceSnapshot | None = None
         before_swap = None
         planned_requirement = None
         planned_swaps = ()
+        decrease_check: Callable[[str], None] | None = None
         mint_check: Callable[[str], None] | None = None
 
         def burn(intent_id: str) -> Intent:
+            nonlocal decrease_check
+            latest = self._latest_decrease_sample()
+            amount0_min, amount1_min = self._decrease_minimums(
+                position, latest
+            )
+            decrease_check = self._decrease_simulation_check(position, latest)
             return self.position_manager.decrease_liquidity(
                 token_id=position.token_id,
                 liquidity=position.liquidity,
@@ -574,12 +622,20 @@ class ProductionActions:
                 raise ActionError("mint Intent 尚未构造，拒绝检查模拟结果")
             mint_check(raw_result)
 
+        def check_decrease_simulation(raw_result: str) -> None:
+            if decrease_check is None:
+                raise ActionError(
+                    "decreaseLiquidity Intent 尚未构造，拒绝检查模拟结果"
+                )
+            decrease_check(raw_result)
+
         return RebalanceActions(
             burn=burn,
             collect=collect,
             read_balances=read_balances,
             build_swap=build_swap,
             mint=mint,
+            decrease_simulation_check=check_decrease_simulation,
             mint_simulation_check=check_mint_simulation,
         )
 
@@ -588,8 +644,14 @@ class ProductionActions:
         broadcast = require_broadcast_flag(allow_broadcast)
         initial = self.reader.read(self.owner, spenders=self._spenders)
         position = self._active_position(initial)
-        amount0_min, amount1_min = self._decrease_minimums(position, sample)
         try:
+            latest = self._latest_decrease_sample()
+            amount0_min, amount1_min = self._decrease_minimums(
+                position, latest
+            )
+            simulation_check = self._decrease_simulation_check(
+                position, latest
+            )
             decrease = self.position_manager.decrease_liquidity(
                 token_id=position.token_id,
                 liquidity=position.liquidity,
@@ -599,7 +661,10 @@ class ProductionActions:
             )
         except Exception as error:
             raise ActionError(f"decreaseLiquidity Intent 构造失败：{error}") from error
-        self._execute(decrease, "decreaseLiquidity", broadcast)
+        self._execute(
+            decrease, "decreaseLiquidity", broadcast,
+            simulation_check=simulation_check,
+        )
 
         try:
             collect = self.position_manager.collect(
@@ -688,4 +753,25 @@ def _mint_min_deposit_bps(path: Path = RISK_PATH) -> int:
         raise ActionError(f"无法读取 mint 风控配置 {path}：{error}") from error
     if type(value) is not int or not 0 <= value <= 10_000:
         raise ActionError("limits.mint_min_deposit_bps 必须是 0..10000 的整数")
+    return value
+
+
+def _decrease_min_withdraw_bps(path: Path = RISK_PATH) -> int:
+    """读取 decreaseLiquidity 模拟取出价值下限，缺省为 5000 bps。"""
+    try:
+        root = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if type(root) is not dict or type(root.get("limits")) is not dict:
+            raise TypeError("根节点与 limits 必须是映射")
+        limits = root["limits"]
+        value = limits.get(
+            "decrease_min_withdraw_bps", DEFAULT_DECREASE_MIN_WITHDRAW_BPS
+        )
+    except (OSError, KeyError, TypeError, yaml.YAMLError) as error:
+        raise ActionError(
+            f"无法读取 decreaseLiquidity 风控配置 {path}：{error}"
+        ) from error
+    if type(value) is not int or not 0 <= value <= 10_000:
+        raise ActionError(
+            "limits.decrease_min_withdraw_bps 必须是 0..10000 的整数"
+        )
     return value

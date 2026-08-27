@@ -266,17 +266,28 @@ class CalldataPolicyTest(unittest.TestCase):
             NPM, self.collect(recipient=ATTACKER), message="recipient"
         )
 
-    def test_decrease_rejects_two_zero_minimums_but_allows_one_zero_leg(self):
-        self.assert_rejected(
-            NPM,
-            self.decrease(amount0_min=0, amount1_min=0),
-            message="amount0Min.*amount1Min",
-        )
+    def test_decrease_allows_two_zero_minimums_with_nonzero_liquidity(self):
         self.policy.validate(
             target=NPM,
-            calldata=self.decrease(amount0_min=0, amount1_min=1),
+            calldata=self.decrease(amount0_min=0, amount1_min=0),
             value=0,
             now_ts=NOW,
+        )
+
+    def test_decrease_still_rejects_zero_liquidity(self):
+        self.assert_rejected(
+            NPM,
+            self.decrease(liquidity=0, amount0_min=0, amount1_min=0),
+            message="liquidity",
+        )
+
+    def test_decrease_still_rejects_token_id_outside_allowed_set(self):
+        self.assert_rejected(
+            NPM,
+            self.decrease(
+                token_id=TOKEN_ID + 1, amount0_min=0, amount1_min=0,
+            ),
+            message="tokenId",
         )
 
     def test_mint_allows_two_zero_minimums_when_desired_is_nonzero(self):

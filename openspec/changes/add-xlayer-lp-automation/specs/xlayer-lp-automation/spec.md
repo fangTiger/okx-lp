@@ -268,7 +268,7 @@
 
 #### Scenario: 建仓完整顺序与参数保护
 - **WHEN** enter 具有正数可用本金
-- **THEN** 必要 approve 全部先于 swap 与 mint，mint 使用状态机传入的 ticks、按当前价与区间配比后的 desired、基于 desired 的滑点下限、owner recipient 和受限 deadline
+- **THEN** 必要 approve 全部先于 swap 与 mint，mint 使用状态机传入的 ticks、按最新价与区间配比后的 desired、双零 minimum、owner recipient 和受限 deadline，并校验模拟返回的实际存入总价值
 
 #### Scenario: 建仓配比受两腿预算约束
 - **WHEN** swap 完成或跳过后得到两腿可投入预算
@@ -276,7 +276,7 @@
 
 #### Scenario: 建仓价格位于区间外
 - **WHEN** 当前价格位于 mint 目标区间下方或上方
-- **THEN** 数学上不需要的那一腿 desired 与 minimum 均允许为零，另一腿 minimum 按 desired 扣除最大滑点后向下取整
+- **THEN** 数学上不需要的那一腿 desired 允许为零，两个 minimum 均为零，存入保护由模拟返回的实际总价值提供
 
 #### Scenario: 撤出清成 USDC
 - **WHEN** exit 处理唯一有效本池头寸
@@ -326,20 +326,24 @@
 - **WHEN** 同一 UTC 日期距上次成功记录不足 300 秒
 - **THEN** 记录器返回 false 且不追加新行；跨日时写入新的日期文件
 
-### Requirement: decreaseLiquidity 滑点保护
-系统 MUST 使用状态机决策轮同一区块的 `sqrtPriceX96` 计算撤流动性的预期两腿数量，并按配置滑点向下计算最小数量。
+### Requirement: decreaseLiquidity 模拟价值保护
+系统 MUST 把 decreaseLiquidity 的两个 minimum 设为零，并使用紧邻 Intent 构造前读取的池快照估算头寸当前价值，再校验模拟返回的实际取出总价值。
 
-#### Scenario: 价格在区间内
-- **WHEN** 头寸当前价格位于 tickLower 与 tickUpper 之间
-- **THEN** exit 与 rebalance 的 decreaseLiquidity 两个最小数量均等于预期数量扣除最大滑点后的向下取整值，且均大于零
+#### Scenario: 任意区间价格下构造撤流动性
+- **WHEN** exit 或 rebalance 为非零流动性头寸构造 decreaseLiquidity
+- **THEN** amount0Min 与 amount1Min 均为零，不使用随窄区间价格剧烈摆动的 per-leg 比例约束
 
-#### Scenario: 价格在区间外
-- **WHEN** 当前价格位于区间下方或上方
-- **THEN** 数学上无法取出的那一腿最小数量允许为零，另一腿必须具有滑点下限
+#### Scenario: 模拟取出价值达到下限
+- **WHEN** 模拟返回的两腿总价值不低于最新快照头寸估值乘以 `decrease_min_withdraw_bps`，该配置缺省为 5000
+- **THEN** decreaseLiquidity 模拟校验通过
 
-#### Scenario: 签名边界拒绝双零下限
-- **WHEN** 非零流动性的 decreaseLiquidity calldata 中两个最小数量同时为零
-- **THEN** calldata 参数策略拒绝签名
+#### Scenario: 模拟取出价值低于下限
+- **WHEN** 模拟返回的两腿总价值低于最新快照头寸估值乘以 `decrease_min_withdraw_bps`
+- **THEN** 系统以中文错误中止 decreaseLiquidity，不执行广播
+
+#### Scenario: decreaseLiquidity 双零签名边界
+- **WHEN** decreaseLiquidity 的 liquidity 为正数、tokenId 属于允许集合且两个 minimum 均为零
+- **THEN** calldata 参数策略允许签名，同时继续拒绝零 liquidity 与未授权 tokenId
 
 ### Requirement: 生产入口三重广播门
 系统 MUST 只在配置 `mode=live`、显式 `--broadcast` 与精确交互确认同时成立时允许广播；用户显式传入 `--yes` 时可以代替第三重交互确认，但它不得代替前两重门。系统并 MUST 在所有退出路径关闭签名子进程。

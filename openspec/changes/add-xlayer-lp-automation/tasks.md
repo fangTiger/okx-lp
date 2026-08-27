@@ -161,3 +161,9 @@
 - [x] 21.4 接入 USDG/wMRNAx 池、有限额授权白名单与参数级 calldata 策略
 - [x] 21.5 将再平衡进度、每日计数与 NAV 按池隔离，并覆盖回归测试
 - [x] 21.6 完成全量单测、OpenSpec 校验与 risk/log/USDC 逻辑红线自查
+
+## M22 decreaseLiquidity 模拟取出价值保护（批次 19）
+- [x] 22.1 以实盘区间与流动性复现 per-leg minimum 的数学矛盾
+- [x] 22.2 将 decreaseLiquidity minimum 改为双零并校验模拟取出总价值
+- [x] 22.3 为 exit 与 rebalance burn 接入最新池快照校验，放宽对应 calldata 策略
+- [x] 22.4 完成全量单测、OpenSpec 校验与 config/log/swap minimum 红线自查

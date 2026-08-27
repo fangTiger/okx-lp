@@ -359,10 +359,8 @@ class CalldataPolicy:
             raise CalldataPolicyError(
                 "amount0Min 与 amount1Min 必须是非负整数"
             )
-        if amount0_min == 0 and amount1_min == 0:
-            raise CalldataPolicyError(
-                "amount0Min 与 amount1Min 不得同时为 0"
-            )
+        # decreaseLiquidity 的 minimum 是窄区间下不稳定的比例约束，
+        # 因此允许双零；liquidity、tokenId 与模拟取出价值仍独立保护。
         self._deadline(deadline, now_ts)
 
     def _validate_collect(self, values: tuple[Any, ...], _now_ts: int) -> None:

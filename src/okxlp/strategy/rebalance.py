@@ -53,6 +53,7 @@ class RebalanceActions:
         [SwapRequirement, tuple[str, ...]], tuple[ScheduledSwap, ...]
     ]
     mint: Callable[[str], Intent]
+    decrease_simulation_check: Callable[[str], None] | None = None
     mint_simulation_check: Callable[[str], None] | None = None
 @dataclass(frozen=True)
 class RebalanceProgress:
@@ -188,7 +189,8 @@ class RebalanceOrchestrator:
                 burn = actions.burn(intent_id)
                 self._ensure_intent_id(burn, intent_id)
                 progress = self._run_stage(
-                    progress, stage, ((burn, 0),), broadcast
+                    progress, stage, ((burn, 0),), broadcast,
+                    simulation_check=actions.decrease_simulation_check,
                 )
             stage = "collect"
             if not self._completed(progress, stage):
