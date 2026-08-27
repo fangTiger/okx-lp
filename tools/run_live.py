@@ -217,17 +217,39 @@ class LiveRuntime:
     """逐次调用状态机单轮运行，并在每轮后完成生产观察动作。"""
 
     def __init__(
-        self, *, machine, risk_gate, signer, reader, rpc, pool, owner,
-        spenders, nav_recorder, token_ids, printer,
+        self, *, machine, risk_gate, signer, executor, policy, reader, rpc,
+        pool, owner, spenders, nav_recorder, printer,
     ) -> None:
         self.machine = machine
         self.risk_gate = risk_gate
         self.signer = signer
+        self.executor = executor
+        self.policy = policy
         self.reader, self.rpc, self.pool = reader, rpc, pool
         self.owner, self.spenders = owner, spenders
         self.nav_recorder = nav_recorder
-        self.token_ids = frozenset(token_ids)
         self.printer = printer
+
+    def _synchronize_token_ids(self, token_ids: frozenset[int]) -> None:
+        """按链上集合同步主进程与签名子进程的 tokenId 策略。"""
+        old_policy = self.policy
+        normalized = frozenset(token_ids)
+        if normalized == old_policy.allowed_token_ids:
+            return
+        new_policy = old_policy.with_token_ids(normalized)
+        self.executor.replace_calldata_policy(new_policy)
+        try:
+            self.signer.refresh_token_ids(normalized)
+        except BaseException:
+            # RemoteSigner 对响应不确定的通信失败会直接关闭子进程；若子进程
+            # 明确拒绝则不会更新。此处回滚主进程，避免留下单边已更新状态。
+            self.executor.replace_calldata_policy(old_policy)
+            raise
+        self.policy = new_policy
+        self.printer(
+            "主进程与签名策略 tokenId 已同步："
+            f"{sorted(old_policy.allowed_token_ids)} → {sorted(normalized)}"
+        )
 
     def run(self, *, allow_broadcast: bool, max_iterations: int | None) -> None:
         broadcast = require_broadcast_flag(allow_broadcast)
@@ -243,10 +265,10 @@ class LiveRuntime:
             nav, portfolio = _nav_snapshot(
                 self.rpc, self.reader, self.pool, self.owner, self.spenders
             )
-            if portfolio.token_ids != self.token_ids:
-                self.signer.refresh_token_ids(portfolio.token_ids)
-                self.token_ids = portfolio.token_ids
-                self.printer(f"签名策略 tokenId 已刷新：{sorted(self.token_ids)}")
+            # 同轮 NAV 已通过 PortfolioReader 取得链上事实，直接复用该快照；
+            # 只有状态发生转移才同步，稳态 IN_RANGE → IN_RANGE 不增加 RPC。
+            if previous is not current:
+                self._synchronize_token_ids(portfolio.token_ids)
             written = self.nav_recorder.record(nav)
             self.printer(
                 f"本轮状态：{previous.value} → {current.value}；"
@@ -380,11 +402,11 @@ class LiveBootstrap:
         )
         return LiveRuntime(
             machine=machine, risk_gate=risk_gate, signer=self.signer,
+            executor=self.executor, policy=self.policy,
             reader=self.reader, rpc=self.rpc, pool=self.pool,
             owner=self.result.snapshot.owner,
             spenders=(self.addresses.npm, self.addresses.router),
             nav_recorder=NavRecorder(paths.nav_root),
-            token_ids=self.result.token_ids,
             printer=self.printer,
         )
 

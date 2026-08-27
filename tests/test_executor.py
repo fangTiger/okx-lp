@@ -46,11 +46,15 @@ def mint_calldata(recipient=SENDER):
     return "0x88316456" + encode([abi_type], [values]).hex()
 
 
-def collect_calldata(recipient):
-    values = (15857, recipient, 2**128 - 1, 2**128 - 1)
+def collect_calldata(recipient, token_id=15857):
+    values = (token_id, recipient, 2**128 - 1, 2**128 - 1)
     return "0xfc6f7865" + encode(
         ["(uint256,address,uint128,uint128)"], [values]
     ).hex()
+
+
+def burn_calldata(token_id=15857):
+    return "0x42966c68" + encode(["uint256"], [token_id]).hex()
 
 
 class RecordingWhitelist:
@@ -325,6 +329,84 @@ class TransactionExecutorTest(unittest.TestCase):
         self.assertEqual(self.signer.calls, 0)
         self.assertEqual(self.rpc.broadcasts, [])
         self.assertNotIn("eth_sendRawTransaction", self.events)
+
+    def test_replace_calldata_policy_accepts_only_token_ids_change(self):
+        executor = self._executor(calldata_policy=self._real_policy())
+        updated = executor.calldata_policy.with_token_ids(
+            frozenset({18_761})
+        )
+
+        executor.replace_calldata_policy(updated)
+
+        self.assertIs(executor.calldata_policy, updated)
+
+    def _assert_policy_replacement_rejected(self, updated, field):
+        executor = self._executor(calldata_policy=self._real_policy())
+        original = executor.calldata_policy
+
+        with self.assertRaisesRegex(ExecutionError, field):
+            executor.replace_calldata_policy(updated)
+
+        self.assertIs(executor.calldata_policy, original)
+
+    def test_replace_calldata_policy_rejects_executor_address_change(self):
+        original = self._real_policy()
+        self._assert_policy_replacement_rejected(
+            replace(original, executor_address=ATTACKER),
+            "executor_address",
+        )
+
+    def test_replace_calldata_policy_rejects_token0_change(self):
+        original = self._real_policy()
+        self._assert_policy_replacement_rejected(
+            replace(
+                original,
+                token0=ATTACKER,
+                max_approval_raw={
+                    ATTACKER: original.max_approval_raw[TOKEN0],
+                    TOKEN1: original.max_approval_raw[TOKEN1],
+                },
+            ),
+            "token0",
+        )
+
+    def test_replace_calldata_policy_rejects_fee_change(self):
+        original = self._real_policy()
+        self._assert_policy_replacement_rejected(
+            replace(original, fee=3_000), "fee"
+        )
+
+    def test_replace_calldata_policy_rejects_max_approval_raw_change(self):
+        original = self._real_policy()
+        limits = dict(original.max_approval_raw)
+        limits[TOKEN0] += 1
+        self._assert_policy_replacement_rejected(
+            replace(original, max_approval_raw=limits),
+            "max_approval_raw",
+        )
+
+    def test_replaced_policy_allows_new_burn_but_keeps_recipient_lock(self):
+        executor = self._executor(
+            TransactionWhitelist.from_config(), self._real_policy()
+        )
+        new_token_id = 18_761
+        burn = Intent.create(NPM, burn_calldata(new_token_id))
+
+        with self.assertRaisesRegex(CalldataPolicyError, "tokenId"):
+            executor._validate_intent(burn)
+
+        executor.replace_calldata_policy(
+            executor.calldata_policy.with_token_ids(
+                frozenset({new_token_id})
+            )
+        )
+        executor._validate_intent(burn)
+        with self.assertRaisesRegex(CalldataPolicyError, "recipient"):
+            executor._validate_intent(
+                Intent.create(
+                    NPM, collect_calldata(ATTACKER, new_token_id)
+                )
+            )
 
     def test_simulation_revert_is_persisted_and_aborts_signing(self):
         self.rpc.revert = "价格保护"

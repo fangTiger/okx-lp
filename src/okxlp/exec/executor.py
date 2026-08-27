@@ -72,6 +72,31 @@ class TransactionExecutor:
         self.monotonic = monotonic
         self.clock = clock
 
+    def replace_calldata_policy(self, policy: CalldataPolicy) -> None:
+        """只允许替换成仅 allowed_token_ids 不同的策略。"""
+        if not isinstance(policy, CalldataPolicy):
+            raise ExecutionError(
+                "calldata_policy 类型不一致：期望 CalldataPolicy"
+            )
+        locked_fields = (
+            "executor_address",
+            "npm_address",
+            "router_address",
+            "token0",
+            "token1",
+            "fee",
+            "max_deadline_seconds",
+            "max_approval_raw",
+        )
+        for field in locked_fields:
+            if getattr(policy, field) != getattr(self.calldata_policy, field):
+                raise ExecutionError(
+                    f"calldata 策略字段 {field} 不一致，拒绝替换"
+                )
+        # tokenId 集合可变，但 recipient、币对、fee、授权上限等资金安全锁
+        # 不可通过此入口变更；这与签名子进程 refresh_token_ids 的原则一致。
+        self.calldata_policy = policy
+
     def execute(
         self, intent: Intent, *, allow_broadcast: bool = False,
         simulation_check: Callable[[str], None] | None = None,

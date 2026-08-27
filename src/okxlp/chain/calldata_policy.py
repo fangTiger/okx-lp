@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import MappingProxyType
@@ -126,6 +126,23 @@ class CalldataPolicy:
         object.__setattr__(
             self, "max_approval_raw", MappingProxyType(dict(limits))
         )
+
+    def with_token_ids(
+        self, token_ids: frozenset[int]
+    ) -> "CalldataPolicy":
+        """派生出只有 allowed_token_ids 不同的新策略，其余字段一律不变。"""
+        try:
+            normalized = frozenset(token_ids)
+        except TypeError:
+            raise CalldataPolicyError("token_ids 必须是可迭代的整数集合") from None
+        if len(normalized) > 50:
+            raise CalldataPolicyError("token_ids 数量不得超过 50")
+        for token_id in normalized:
+            if type(token_id) is not int or token_id < 0:
+                raise CalldataPolicyError(
+                    f"token_ids 只能包含非负整数，实际值={token_id}"
+                )
+        return replace(self, allowed_token_ids=normalized)
 
     @classmethod
     def from_config(

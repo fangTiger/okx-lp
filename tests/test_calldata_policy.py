@@ -46,6 +46,40 @@ class CalldataPolicyTest(unittest.TestCase):
             max_approval_raw=MAX_APPROVALS,
         )
 
+    def test_with_token_ids_derives_policy_without_mutating_original(self):
+        updated = self.policy.with_token_ids(frozenset({18_761}))
+
+        self.assertIsNot(updated, self.policy)
+        self.assertEqual(updated.allowed_token_ids, frozenset({18_761}))
+        self.assertEqual(
+            {
+                name: getattr(updated, name)
+                for name in self.policy.__dataclass_fields__
+                if name != "allowed_token_ids"
+            },
+            {
+                name: getattr(self.policy, name)
+                for name in self.policy.__dataclass_fields__
+                if name != "allowed_token_ids"
+            },
+        )
+        self.assertEqual(
+            self.policy.allowed_token_ids, frozenset({TOKEN_ID})
+        )
+
+    def test_with_token_ids_rejects_invalid_elements_and_oversized_set(self):
+        invalid_sets = (
+            frozenset({-1}),
+            frozenset({"18761"}),
+            frozenset({True}),
+            frozenset(range(51)),
+        )
+
+        for token_ids in invalid_sets:
+            with self.subTest(token_ids=token_ids):
+                with self.assertRaises(CalldataPolicyError):
+                    self.policy.with_token_ids(token_ids)
+
     def mint(
         self, *, token0=TOKEN0, token1=TOKEN1, recipient=EXECUTOR,
         fee=500, deadline=NOW + 600, amount0_desired=10,

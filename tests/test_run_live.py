@@ -3,10 +3,11 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from eth_account import Account
 
+from okxlp.chain.calldata_policy import CalldataPolicy
 from okxlp.exec.authorization import RunMode
 from okxlp.strategy.machine_state import (
     MachineSnapshot, MachineState, MachineStateStore, PriceBand,
@@ -23,19 +24,50 @@ from tools.run_live import (
 
 OWNER = "0xb7394e865eb6f22df7aa199e59887e8aac0947a2"
 OTHER_OWNER = "0x1111111111111111111111111111111111111111"
+NPM = "0x315e413a11ab0df498ef83873012430ca36638ae"
+ROUTER = "0x4f0c28f5926afda16bf2506d5d9e57ea190f9bca"
+TOKEN0 = "0x9147b03c16b18fc4f686f610f189f91ddf4347b4"
+TOKEN1 = "0xb6ceceab302e2e4948951ee7843fc24e92933061"
 
 
 class FakeSigner:
-    def __init__(self, address=OWNER):
+    def __init__(self, address=OWNER, token_ids=None):
         self.address = address
         self.closed = False
         self.refreshes = []
+        self.token_ids = None if token_ids is None else frozenset(token_ids)
 
     def close(self):
         self.closed = True
 
     def refresh_token_ids(self, token_ids):
-        self.refreshes.append(frozenset(token_ids))
+        normalized = frozenset(token_ids)
+        self.refreshes.append(normalized)
+        self.token_ids = normalized
+
+
+class FakeExecutor:
+    def __init__(self, policy, *, failure=None):
+        self.calldata_policy = policy
+        self.failure = failure
+        self.replacements = []
+
+    def replace_calldata_policy(self, policy):
+        self.replacements.append(policy)
+        if self.failure is not None:
+            raise self.failure
+        self.calldata_policy = policy
+
+
+class FakeMachine:
+    def __init__(self, previous, current):
+        self.state = previous
+        self.current = current
+        self.calls = []
+
+    def run(self, *, allow_broadcast, max_iterations):
+        self.calls.append((allow_broadcast, max_iterations))
+        self.state = self.current
 
 
 class FakeRuntime:
@@ -72,6 +104,19 @@ def settings():
         halt_file=Path("log/HALT"),
         confirm_seconds=180,
         pin_timeout=600,
+    )
+
+
+def runtime_policy(token_ids):
+    return CalldataPolicy(
+        executor_address=OWNER,
+        npm_address=NPM,
+        router_address=ROUTER,
+        token0=TOKEN0,
+        token1=TOKEN1,
+        fee=500,
+        allowed_token_ids=frozenset(token_ids),
+        max_approval_raw={TOKEN0: 10**18, TOKEN1: 10**18},
     )
 
 
@@ -342,59 +387,155 @@ class RunLiveGateTest(unittest.TestCase):
 
 
 class LiveRuntimeLoopTest(unittest.TestCase):
-    def test_post_round_records_rebalance_refreshes_ids_and_records_nav(self):
-        class Machine:
-            state = MachineState.REBALANCING
-
-            def __init__(self):
-                self.calls = []
-
-            def run(self, *, allow_broadcast, max_iterations):
-                self.calls.append((allow_broadcast, max_iterations))
-                self.state = MachineState.IN_RANGE
-
-        class RiskGate:
-            def __init__(self):
-                self.calls = []
-
-            def record_rebalance(self, now):
-                self.calls.append(now)
-                return 7
-
-        class Recorder:
-            def __init__(self):
-                self.snapshots = []
-
-            def record(self, snapshot):
-                self.snapshots.append(snapshot)
-                return True
-
-        machine = Machine()
-        gate = RiskGate()
-        signer = FakeSigner()
-        recorder = Recorder()
-        output = []
+    def _runtime(
+        self, *, previous=MachineState.REBALANCING,
+        current=MachineState.IN_RANGE, policy=None, executor=None,
+        signer=None, chain_token_ids=frozenset({18_761}),
+    ):
+        selected_policy = policy or runtime_policy({18_720})
+        selected_executor = executor or FakeExecutor(selected_policy)
+        selected_signer = signer or FakeSigner(
+            token_ids=selected_policy.allowed_token_ids
+        )
+        machine = FakeMachine(previous, current)
+        gate = Mock()
+        gate.record_rebalance.return_value = 7
+        recorder = Mock()
+        recorder.record.return_value = True
+        reader = Mock()
+        portfolio = SimpleNamespace(token_ids=frozenset(chain_token_ids))
+        reader.read.return_value = portfolio
         nav = NavSnapshot(
             ts="2026-08-26T00:00:00Z", block=1, price="1",
             position_value_usdc="2", idle0_raw=3, idle1_raw=4,
             total_usdc="5",
         )
-        portfolio = SimpleNamespace(token_ids=frozenset({15_857, 15_858}))
+
+        def snapshot(_rpc, selected_reader, _pool, owner, spenders):
+            return nav, selected_reader.read(owner, spenders=spenders)
+
+        output = []
         runtime = LiveRuntime(
-            machine=machine, risk_gate=gate, signer=signer,
-            reader=object(), rpc=object(), pool=object(), owner=OWNER,
-            spenders=(), nav_recorder=recorder, token_ids={15_857},
-            printer=output.append,
+            machine=machine, risk_gate=gate, signer=selected_signer,
+            executor=selected_executor, policy=selected_policy,
+            reader=reader, rpc=object(), pool=object(), owner=OWNER,
+            spenders=(), nav_recorder=recorder, printer=output.append,
+        )
+        return (
+            runtime, machine, gate, selected_executor, selected_signer,
+            recorder, reader, nav, portfolio, snapshot, output,
         )
 
-        with patch("tools.run_live._nav_snapshot", return_value=(nav, portfolio)):
+    def test_rebalance_refreshes_main_and_signer_from_same_chain_ids(self):
+        values = self._runtime()
+        (
+            runtime, machine, gate, executor, signer, recorder,
+            _reader, nav, portfolio, snapshot, output,
+        ) = values
+        calls = []
+        original = CalldataPolicy.with_token_ids
+
+        def recording_with_token_ids(policy, token_ids):
+            calls.append(frozenset(token_ids))
+            return original(policy, token_ids)
+
+        with (
+            patch("tools.run_live._nav_snapshot", side_effect=snapshot),
+            patch.object(
+                CalldataPolicy, "with_token_ids",
+                new=recording_with_token_ids,
+            ),
+        ):
             runtime.run(allow_broadcast=False, max_iterations=1)
 
         self.assertEqual(machine.calls, [(False, 1)])
-        self.assertEqual(len(gate.calls), 1)
+        self.assertEqual(gate.record_rebalance.call_count, 1)
+        self.assertEqual(calls, [portfolio.token_ids])
+        self.assertEqual(
+            [item.allowed_token_ids for item in executor.replacements],
+            [portfolio.token_ids],
+        )
         self.assertEqual(signer.refreshes, [portfolio.token_ids])
-        self.assertEqual(recorder.snapshots, [nav])
+        self.assertEqual(runtime.policy.allowed_token_ids, portfolio.token_ids)
+        recorder.record.assert_called_once_with(nav)
         self.assertIn("第 7 次再平衡", "\n".join(output))
+        self.assertIn("[18720] → [18761]", "\n".join(output))
+
+    def test_policy_derivation_failure_propagates_without_partial_update(self):
+        values = self._runtime()
+        runtime, _machine, _gate, executor, signer = values[:5]
+        original = runtime.policy
+
+        with (
+            patch("tools.run_live._nav_snapshot", side_effect=values[9]),
+            patch.object(
+                CalldataPolicy, "with_token_ids",
+                side_effect=RuntimeError("策略派生失败"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "策略派生失败"),
+        ):
+            runtime.run(allow_broadcast=False, max_iterations=1)
+
+        self.assertIs(runtime.policy, original)
+        self.assertIs(executor.calldata_policy, original)
+        self.assertEqual(signer.token_ids, original.allowed_token_ids)
+
+    def test_executor_replacement_failure_propagates_without_partial_update(self):
+        policy = runtime_policy({18_720})
+        executor = FakeExecutor(policy, failure=RuntimeError("执行器替换失败"))
+        values = self._runtime(policy=policy, executor=executor)
+        runtime, _machine, _gate, _executor, signer = values[:5]
+
+        with (
+            patch("tools.run_live._nav_snapshot", side_effect=values[9]),
+            self.assertRaisesRegex(RuntimeError, "执行器替换失败"),
+        ):
+            runtime.run(allow_broadcast=False, max_iterations=1)
+
+        self.assertIs(runtime.policy, policy)
+        self.assertIs(executor.calldata_policy, policy)
+        self.assertEqual(signer.token_ids, policy.allowed_token_ids)
+
+    def test_signer_refresh_failure_rolls_back_main_policy_and_propagates(self):
+        class FailingSigner(FakeSigner):
+            def refresh_token_ids(self, _token_ids):
+                raise RuntimeError("签名刷新失败")
+
+        policy = runtime_policy({18_720})
+        signer = FailingSigner(token_ids=policy.allowed_token_ids)
+        values = self._runtime(policy=policy, signer=signer)
+        runtime, _machine, _gate, executor = values[:4]
+
+        with (
+            patch("tools.run_live._nav_snapshot", side_effect=values[9]),
+            self.assertRaisesRegex(RuntimeError, "签名刷新失败"),
+        ):
+            runtime.run(allow_broadcast=False, max_iterations=1)
+
+        self.assertIs(runtime.policy, policy)
+        self.assertIs(executor.calldata_policy, policy)
+        self.assertEqual(signer.token_ids, policy.allowed_token_ids)
+
+    def test_steady_state_skips_token_sync_and_extra_portfolio_read(self):
+        values = self._runtime(
+            previous=MachineState.IN_RANGE,
+            current=MachineState.IN_RANGE,
+        )
+        runtime, _machine, _gate, executor, signer = values[:5]
+        reader = values[6]
+
+        with (
+            patch("tools.run_live._nav_snapshot", side_effect=values[9]),
+            patch.object(
+                CalldataPolicy, "with_token_ids",
+                side_effect=AssertionError("稳态不应派生策略"),
+            ),
+        ):
+            runtime.run(allow_broadcast=False, max_iterations=1)
+
+        reader.read.assert_called_once_with(OWNER, spenders=())
+        self.assertEqual(executor.replacements, [])
+        self.assertEqual(signer.refreshes, [])
 
 
 class RunLiveStateSyncTest(unittest.TestCase):
