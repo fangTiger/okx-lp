@@ -91,8 +91,11 @@ class CampaignVerifierTest(unittest.TestCase):
     def test_matching_chain_values_pass(self):
         report = self._verify(self.config, make_snapshot(self.config))
 
+        # 从配置推导期望值，而不是硬编码池子清单：
+        # 新增池子不应让本用例失败，它要守住的是「配置里的池子都通过了链上校验」
         self.assertEqual(
-            report.verified_pool_ids, ("wASMLx_USDC", "wMRNAx_USDG")
+            report.verified_pool_ids,
+            tuple(pool.pool_id for pool in self.config.pools),
         )
         self.assertEqual(report.block, 68886709)
 

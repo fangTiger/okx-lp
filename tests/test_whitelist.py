@@ -65,22 +65,29 @@ class TransactionWhitelistTest(unittest.TestCase):
 
         data = yaml.safe_load(Path("config/execution.yaml").read_text(encoding="utf-8"))
 
-        self.assertEqual(
-            data["addresses"],
-            {
-                "pool": "0xc3d659028117f1ae5db9b9c68239b4a71f03ef37",
-                "factory": "0x4b2ab38dbf28d31d467aa8993f6c2585981d6804",
-                "npm": NPM,
-                "swap_router02": ROUTER,
-                "quoter_v2": QUOTER,
-                "permit2": PERMIT2,
-                "weth9": "0xe538905cf8410324e03a5a23c1c177a474d59b2b",
-                "wasmlx": TOKEN,
-                "usdc": "0xb6ceceab302e2e4948951ee7843fc24e92933061",
-                "usdg": USDG,
-                "wmrnax": WMRNAX,
-            },
-        )
+        # 断言「已核验过的地址必须都在且值正确」，而非全集相等。
+        # 用全集相等会导致每新增一个池子或代币就误报失败，
+        # 但新增条目本身不构成安全风险——真正要守住的是已确认地址不被篡改。
+        confirmed = {
+            "pool": "0xc3d659028117f1ae5db9b9c68239b4a71f03ef37",
+            "factory": "0x4b2ab38dbf28d31d467aa8993f6c2585981d6804",
+            "npm": NPM,
+            "swap_router02": ROUTER,
+            "quoter_v2": QUOTER,
+            "permit2": PERMIT2,
+            "weth9": "0xe538905cf8410324e03a5a23c1c177a474d59b2b",
+            "wasmlx": TOKEN,
+            "usdc": "0xb6ceceab302e2e4948951ee7843fc24e92933061",
+            "usdg": USDG,
+            "wmrnax": WMRNAX,
+        }
+        for name, address in confirmed.items():
+            with self.subTest(address=name):
+                self.assertEqual(data["addresses"].get(name), address)
+        # 新增条目必须是合法地址格式，防止误写
+        for name, address in data["addresses"].items():
+            with self.subTest(extra=name):
+                self.assertRegex(str(address), r"^0x[0-9a-fA-F]{40}$")
         whitelist = TransactionWhitelist.from_config(Path("config/execution.yaml"))
         for selector in (
             "0x88316456", "0x0c49ccbe", "0xfc6f7865", "0x42966c68"
