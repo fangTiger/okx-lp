@@ -46,7 +46,7 @@ pools:
       active_liquidity_equiv_usdc_at_0p5pct: 2886
 
   - id: wMRNAx_USDG
-    enabled: true
+    enabled: false                 # 2026-08-27 停用：流动性被灌入 17 倍，收益率降至倒数
     uniswap_version: v3
     address: "0x3a6a9eb4db50edfbc776a11b551eae015a3d7e90"
     factory: "0x4b2ab38dbf28d31d467aa8993f6c2585981d6804"
@@ -64,6 +64,28 @@ pools:
     underlying: MRNA
     listings:
       - venue: NASDAQ
+        timezone: America/New_York
+        hours_local: "09:30-16:00"
+
+  - id: wBMNRx_USDG
+    enabled: true                  # 2026-08-27 接入：实测手续费/流动性最优
+    uniswap_version: v3
+    address: "0xf05577e469d04cc8fd84a79c1fe5661b3394cc0e"
+    factory: "0x4b2ab38dbf28d31d467aa8993f6c2585981d6804"
+    quote_leg: token0
+    token0:
+      symbol: USDG
+      address: "0x4ae46a509f6b1d9056937ba4500cb143933d2dc8"
+      decimals: 6
+    token1:
+      symbol: wBMNRx
+      address: "0xdad5623b32c81aeaa75478fcfe934e9e97018c58"
+      decimals: 18
+    fee_bps: 5
+    tick_spacing: 10
+    underlying: BMNR
+    listings:
+      - venue: NYSE American
         timezone: America/New_York
         hours_local: "09:30-16:00"
 
